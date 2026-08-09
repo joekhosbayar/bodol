@@ -1,0 +1,39 @@
+# USD per 1M tokens. Data, not code — so old traces can be re-costed and new
+# models added without a release.
+#
+# VERIFY BEFORE TRUSTING: https://ai.google.dev/gemini-api/docs/pricing
+# Snapshot taken 2026-08-09; these change and paid/free tiers differ.
+#
+# Record the rate you used INTO each trace record at write time. Recomputing
+# cost later from this file silently rewrites the history of what you spent.
+
+gemini:
+  gemini-2.0-flash:
+    input: 0.10
+    output: 0.40
+    cached_input: 0.025
+
+  gemini-2.0-flash-lite:
+    input: 0.075
+    output: 0.30
+    cached_input: null
+
+  gemini-2.5-flash-lite:
+    input: 0.10
+    output: 0.40
+    cached_input: 0.025
+
+  gemini-2.5-flash:
+    input: 0.30
+    output: 2.50
+    cached_input: 0.075
+
+  gemini-2.5-pro:
+    # Tiered: prompts over 200k tokens bill at input 2.50 / output 15.00.
+    # Your cost function needs to know that, or long-context runs read cheap.
+    input: 1.25
+    output: 10.00
+    cached_input: 0.31
+
+# openai:
+# anthropic:
