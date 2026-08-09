@@ -5,7 +5,7 @@ description = "A model-agnostic AI agent framework built from scratch"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "google-genai>=1.0.0",
+    "httpx>=0.28",
     "typer>=0.15.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
@@ -21,6 +21,9 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "types-pyyaml>=6.0",
+    "respx>=0.22",
+    # Schema reference only — read the types, never ship them. See providers/http.py.
+    "google-genai>=1.0.0",
 ]
 
 [build-system]
