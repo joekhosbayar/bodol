@@ -1,0 +1,39 @@
+{
+    "id": "v1_ChdGUDk0YXVmV0c0V2cxTWtQMTlHMjJRURIWcHdSNWFwTlF0clgtNHctcl85YmhDdw",
+    "status": "completed",
+    "usage": {
+        "total_tokens": 142,
+        "total_input_tokens": 122,
+        "input_tokens_by_modality": [
+            {
+                "modality": "text",
+                "tokens": 122
+            }
+        ],
+        "total_cached_tokens": 0,
+        "total_output_tokens": 20,
+        "total_tool_use_tokens": 0,
+        "total_thought_tokens": 0,
+        "raw_prompt_token": 172
+    },
+    "created": "2026-08-09T22:52:23Z",
+    "updated": "2026-08-09T22:52:23Z",
+    "service_tier": "standard",
+    "steps": [
+        {
+            "signature": "EjQKMgERTTIP1DZi0utMSXeI64CFlzWwOHoAO0kI7lW1MYRxV0SbmLPTurRZJ5mjWGBv+tbe",
+            "type": "thought"
+        },
+        {
+            "content": [
+                {
+                    "text": "The current weather in Ulaanbaatar is clear with a temperature of 12°C.",
+                    "type": "text"
+                }
+            ],
+            "type": "model_output"
+        }
+    ],
+    "object": "interaction",
+    "model": "gemini-3.6-flash"
+}
