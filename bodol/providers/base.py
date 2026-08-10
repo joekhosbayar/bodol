@@ -91,14 +91,24 @@ class ToolCall:
     not always the block's own identifier. On OpenAI it is `call_id` (`call_…`),
     NOT the item's `id` (`fc_…`).
 
-    `args` is always parsed. Gemini and Anthropic hand back an object; OpenAI
-    hands back a JSON string, so that adapter owns the json.loads and the
-    malformed-JSON failure mode.
+    `args is None` means the provider sent arguments that did not decode. That
+    is a recoverable state, not a failure: the response is still returned with
+    its usage intact, and the runtime must NOT dispatch the call. Return a
+    ToolResultBlock with is_error=True quoting `raw_args` so the model can
+    correct itself on the next step.
+
+    Optional rather than a sentinel `{}` on purpose — mypy forces a None check
+    before `**call.args`, so "dispatched a broken call with no arguments"
+    becomes a type error instead of a silent wrong tool invocation.
     """
 
     id: str
     name: str
-    args: dict[str, Any]
+    args: dict[str, Any] | None
+    # The provider's literal wire value, when it sent one. OpenAI ships a JSON
+    # string; Gemini and Anthropic ship objects and leave this None. Kept even
+    # on success so history can be replayed byte-for-byte.
+    raw_args: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,11 +169,18 @@ class TextBlock:
 
 @dataclass(frozen=True, slots=True)
 class ToolUseBlock:
-    """A tool call being replayed back to the model as conversation history."""
+    """A tool call being replayed back to the model as conversation history.
+
+    A call whose arguments never decoded still has to be replayed — the model's
+    turn must be echoed before its error result. Pass the original string as
+    `raw_args` and `{}` as `args`; adapters that transmit arguments as a string
+    prefer `raw_args`, which also keeps the replayed bytes cache-identical.
+    """
 
     id: str
     name: str
     args: dict[str, Any]
+    raw_args: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

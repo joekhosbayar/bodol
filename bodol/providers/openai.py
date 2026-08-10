@@ -44,23 +44,6 @@ BASE_URL = "https://api.openai.com"
 ENDPOINT = "/v1/responses"
 
 
-class ToolArgumentDecodeError(ValueError):
-    """The model emitted `arguments` that is not valid JSON.
-
-    Raised rather than swallowed so the failure is loud. Note the cost: the
-    whole response is discarded, including the `usage` you were billed for. If
-    you would rather feed the error back to the model as a tool result and let
-    it retry, catch this in the agent loop — `call_id` and `raw_arguments` are
-    carried on the exception for exactly that.
-    """
-
-    def __init__(self, call_id: str, name: str, raw_arguments: str) -> None:
-        super().__init__(f"tool call {name} ({call_id}) has non-JSON arguments: {raw_arguments!r}")
-        self.call_id = call_id
-        self.name = name
-        self.raw_arguments = raw_arguments
-
-
 # ---------------------------------------------------------------- response
 
 
@@ -105,11 +88,13 @@ def normalize(raw: dict[str, Any], *, latency_ms: float = 0.0) -> ModelResponse:
             case "function_call":
                 arguments = item.get("arguments") or "{}"
                 try:
-                    args = json.loads(arguments)
-                except ValueError as exc:
-                    raise ToolArgumentDecodeError(
-                        item.get("call_id", ""), item.get("name", ""), arguments
-                    ) from exc
+                    args: dict[str, Any] | None = json.loads(arguments)
+                except ValueError:
+                    # Recoverable, not fatal. The response — and the usage you
+                    # were billed for — is kept; the runtime sees args is None,
+                    # declines to dispatch, and returns an error tool result so
+                    # the model can fix its own output on the next step.
+                    args = None
                 tool_calls.append(
                     ToolCall(
                         # `call_id` is what gets echoed back, NOT the item's own
@@ -117,6 +102,7 @@ def normalize(raw: dict[str, Any], *, latency_ms: float = 0.0) -> ModelResponse:
                         id=item["call_id"],
                         name=item["name"],
                         args=args,
+                        raw_args=arguments,
                     )
                 )
             # "reasoning" items carry no content under the default settings.
@@ -172,9 +158,14 @@ def _render_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
                             "type": "function_call",
                             "call_id": block.id,
                             "name": block.name,
-                            # Back out to a compact JSON string, matching the
-                            # form the model emitted.
-                            "arguments": json.dumps(block.args, separators=(",", ":")),
+                            # Replay the provider's own bytes when we have them:
+                            # it is the only way to echo a call whose arguments
+                            # never decoded, and it keeps the prefix cacheable.
+                            "arguments": (
+                                block.raw_args
+                                if block.raw_args is not None
+                                else json.dumps(block.args, separators=(",", ":"))
+                            ),
                         }
                     )
                 case ToolResultBlock():

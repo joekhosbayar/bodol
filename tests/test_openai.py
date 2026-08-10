@@ -96,26 +96,66 @@ def test_history_is_replayed_and_billed() -> None:
     assert (first, second) == (66, 115)
 
 
-def test_malformed_arguments_raise_with_context() -> None:
-    raw = {
+def _mixed_tool_call_response() -> dict[str, object]:
+    """One decodable call and one truncated one, in a single billed turn."""
+    return {
         "id": "resp_1",
+        "model": "gpt-5.6-luna",
         "status": "completed",
         "output": [
             {
                 "type": "function_call",
                 "id": "fc_1",
-                "call_id": "call_1",
+                "call_id": "call_ok",
+                "name": "get_weather",
+                "arguments": '{"city":"Ulaanbaatar"}',
+            },
+            {
+                "type": "function_call",
+                "id": "fc_2",
+                "call_id": "call_bad",
                 "name": "get_weather",
                 "arguments": '{"city": "Ulaanbaa',
-            }
+            },
         ],
+        "usage": {"input_tokens": 66, "output_tokens": 25, "total_tokens": 91},
     }
-    with pytest.raises(openai.ToolArgumentDecodeError) as exc_info:
-        openai.normalize(raw)
 
-    assert exc_info.value.call_id == "call_1"
-    assert exc_info.value.name == "get_weather"
-    assert exc_info.value.raw_arguments == '{"city": "Ulaanbaa'
+
+def test_malformed_arguments_are_recoverable() -> None:
+    """A broken tool call must not cost us the response we were billed for."""
+    r = openai.normalize(_mixed_tool_call_response())
+
+    assert r.finish_reason is FinishReason.TOOL_CALLS
+    assert r.usage.input_tokens == 66, "usage survives a malformed call"
+    assert r.usage.output_tokens == 25
+
+    good, bad = r.tool_calls
+    assert good.args == {"city": "Ulaanbaatar"}
+    assert bad.args is None, "None is the do-not-dispatch signal"
+    assert bad.raw_args == '{"city": "Ulaanbaa', "kept so the model can be told what it sent"
+    assert bad.id == "call_bad"
+
+
+def test_valid_calls_also_keep_their_raw_string() -> None:
+    (call,) = openai.normalize(load("toolcalls/openai_weather_0")).tool_calls
+    assert call.raw_args == '{"city":"Ulaanbaatar","unit":"c"}'
+
+
+def test_a_malformed_call_can_still_be_replayed_as_history() -> None:
+    """Echoing the assistant turn is required before sending its error result."""
+    r = openai.normalize(_mixed_tool_call_response())
+    bad = r.tool_calls[1]
+
+    items = openai._render_messages(
+        [
+            Message("assistant", (ToolUseBlock(bad.id, bad.name, {}, raw_args=bad.raw_args),)),
+            Message("user", (ToolResultBlock(bad.id, "arguments were not valid JSON", True),)),
+        ]
+    )
+    # The undecodable bytes go back verbatim — json.dumps({}) would rewrite them.
+    assert items[0]["arguments"] == '{"city": "Ulaanbaa'
+    assert items[1]["call_id"] == "call_bad"
 
 
 def test_truncation_maps_to_max_tokens() -> None:
@@ -167,6 +207,7 @@ def test_renders_a_full_round_trip_as_items() -> None:
 
 def test_tool_call_args_survive_a_parse_render_round_trip() -> None:
     (call,) = openai.normalize(load("toolcalls/openai_weather_0")).tool_calls
+    assert call.args is not None  # mypy: dispatching requires this check
     item = openai._render_messages(
         [Message("assistant", (ToolUseBlock(call.id, call.name, call.args),))]
     )[0]
