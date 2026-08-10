@@ -49,11 +49,31 @@ _FINISH_REASONS = {
 
 
 def _usage(raw: dict[str, Any]) -> Usage:
+    """Fold thought tokens back into output.
+
+    Two claims that are easy to conflate, and only one of them is true:
+
+        "thoughts are excluded from the total_output_tokens FIELD"   <- true
+        "thoughts are excluded from BILLING"                         <- false
+
+    Thoughts bill at the standard output rate; they are merely *reported* in a
+    sibling field rather than inside total_output_tokens. So the field has to be
+    added back to get true billed output — which is exactly why this function
+    exists, not an argument that Google gives the reasoning away.
+
+    Gemini's own arithmetic is the proof, from tests/fixtures/gemini_response.json:
+
+        total_input_tokens    3
+        total_output_tokens  13
+        total_thought_tokens 259
+        total_tokens         275   <- only balances if output excludes thoughts
+
+    Assigning total_output_tokens directly reports 13 against a call that was
+    billed for 272 tokens of output.
+    """
     thoughts: int = raw.get("total_thought_tokens", 0)
     return Usage(
         input_tokens=raw.get("total_input_tokens", 0),
-        # Thoughts are EXCLUDED from total_output_tokens upstream but bill at
-        # the output rate. gemini_response.json: 3 + 13 + 259 = 275 = total.
         output_tokens=raw.get("total_output_tokens", 0) + thoughts,
         cached_tokens=raw.get("total_cached_tokens", 0),
         reasoning_tokens=thoughts,
