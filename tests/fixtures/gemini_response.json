@@ -1,0 +1,39 @@
+{
+    "id": "v1_ChdQT2w0YXBYdUhiR1ZfdU1QeW9MYXVRVRIXUE9sNGFwWHVIYkdWX3VNUHlvTGF1UVU",
+    "status": "completed",
+    "usage": {
+        "total_tokens": 275,
+        "total_input_tokens": 3,
+        "input_tokens_by_modality": [
+            {
+                "modality": "text",
+                "tokens": 3
+            }
+        ],
+        "total_cached_tokens": 0,
+        "total_output_tokens": 13,
+        "total_tool_use_tokens": 0,
+        "total_thought_tokens": 259,
+        "raw_prompt_token": 34
+    },
+    "created": "2026-08-09T20:55:24Z",
+    "updated": "2026-08-09T20:55:24Z",
+    "service_tier": "standard",
+    "steps": [
+        {
+            "signature": "ErYICrMIARFNMg/drWAEER/cvCL1f5LKKuTswzXFJtPmyp0cuI3cwBK2iNZtaJbx9pU4ZnZ4ewWqB1EXN/8WHE5Ny5FIH8XNbZazjHOHMH3OtwQrmYtkrDyHPzPJoyBh7tL2EwSXQeg/wNTAV0O73fknig9CHqp1M+y1js+m7EaKaUxVMJamVx78oeSvunFtm5uzkbSAtDQhG0Rcx4LvkjxZbNGQBD43iBatZlsU1UQvPBd3qX0u6ipiP6NPEQlzAfiLxKht7g8W0+TV/F4BYRC28IRHHl1OVr2hMWsknTk1DAyrlf/al5EMfDItwE3nPtbOHYVXTZT4SO3M5KMOu3+Sp7pztWnJ15oKpAIhAyDedIffwS26ZLMmEmXnpfkxt433No/jXanrsZtKgpnUqHNaGNk3Uvx3dtILDjchFvU3PPQecFXunHJW+HxC2kpl5LW/fcG7e28RmMreE65H1c2Vky6osXBEIr/3BuTBWHDKNOPTcwsDFW7iqE2PuhSNVCVF2ThPnP9q5G6F9nZFu2GS6wm+hUD0dDo/2hnzTrMjwD0EbuMv0YhrDbzCObgYT8l/PJls+7OHSTdH1uUURDe6ZfuFCOuGL8joNCmbaZ2bntxZoSKwPJww7kgcHGbSHAL5v4I4P0bkMw3vEKGKIcMix4kQvKODaU8qb9fs0bX8UfWblvG9u8gXSxgBEiJ1CmnR2f293pd/ffZjdK8+xBEvqgkAmEuDwjAYZKVO1aOQBQRRkiqItif76/ZjCyhhY5fAf31SOi9mKHLi+K0uPJLnl4T+kqITzu8SXihRMsbKqv38odh6AhqLmjjfJVYkx8CvdFqKvdz4MN/dFipYolDrwpQ/Az89uvPPmp+FlPPzGIfTA36VlaKuVZobZscHfRiJLYZS+N6F4Qm+IbsNAgTScwFjP1iGnQkN7nCzqRSCX7BADFRKpimg/wnt5TstrFiSPNHvqqPu2ZcVolqe4/PMhL4eToBJCVQ9bnArsw1w+jYvsYZptpfWDFB9ASNg1Ws3x/a+8ozO1s6jkvKzZ7yQykP4ZjaBvaFsqySo2rM+Ze2dOVosWGpa+kcajUszMvDiTLRBQeyIJ1Rde/npyLD6AyuAKS4aQJn1KC6nxM0Hs/xDaO0XpzbkFZapTbpfWGjR6k21FG93di6X4u/1I36t16IvLXfn0513jiQLQhJhtk6KJ//dbpgPT4Asr5BSnmhI42nwlt1BeqgqN/nBwH47C/dZskfa+k1VqTqPFUVzcWFVXGJO1zD2xAnDEOeH26Gdg24QuFqlPrm9mQwJ8pjdal2kk0u1neuWeiqGhQAfCkRZrIkDwqPN3DN7vnuSQtNASZxBd13FDf0S+0CY8x/2rQpvRwwrKL9u4+L27s1KZXqr2u0XlJZeuRXHd3EjAcxNSILkrTPdeyN+NsMmLFb+yPMF6mlq2A==",
+            "type": "thought"
+        },
+        {
+            "content": [
+                {
+                    "text": "Hello World! 👋 \n\nHow can I help you today?",
+                    "type": "text"
+                }
+            ],
+            "type": "model_output"
+        }
+    ],
+    "object": "interaction",
+    "model": "gemini-3.6-flash"
+}

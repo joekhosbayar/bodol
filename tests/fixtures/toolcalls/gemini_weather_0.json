@@ -1,0 +1,38 @@
+{
+    "id": "v1_ChdGUDk0YXVmV0c0V2cxTWtQMTlHMjJRURIXRlA5NGF1ZldHNFdnMU1rUDE5RzIyUVE",
+    "status": "requires_action",
+    "usage": {
+        "total_tokens": 108,
+        "total_input_tokens": 89,
+        "input_tokens_by_modality": [
+            {
+                "modality": "text",
+                "tokens": 89
+            }
+        ],
+        "total_cached_tokens": 0,
+        "total_output_tokens": 19,
+        "total_tool_use_tokens": 0,
+        "total_thought_tokens": 0,
+        "raw_prompt_token": 129
+    },
+    "created": "2026-08-09T22:28:36Z",
+    "updated": "2026-08-09T22:28:36Z",
+    "service_tier": "standard",
+    "steps": [
+        {
+            "signature": "EjQKMgERTTIPVtJXOu/yEDck28cXNSPu8mpdvz+99OO5cffAtJJBlXU3kSRXJR3e6ripzJ+O",
+            "type": "thought"
+        },
+        {
+            "id": "vLClgAAM",
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": {
+                "city": "Ulaanbaatar"
+            }
+        }
+    ],
+    "object": "interaction",
+    "model": "gemini-3.6-flash"
+}
