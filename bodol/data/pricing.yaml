@@ -1,24 +1,29 @@
 # USD per 1M tokens. Data, not code — so old traces can be re-costed and new
 # models added without a release.
 #
-# VERIFY BEFORE TRUSTING: https://ai.google.dev/gemini-api/docs/pricing
-# Snapshot taken 2026-08-09; these change and paid/free tiers differ.
+# VERIFY BEFORE TRUSTING. These change, and paid/free tiers differ:
+#   gemini    https://ai.google.dev/gemini-api/docs/pricing
+#   openai    https://openai.com/api/pricing
+#   anthropic https://platform.claude.com/docs/en/pricing
 #
-# Record the rate you used INTO each trace record at write time. Recomputing
-# cost later from this file silently rewrites the history of what you spent.
+# A model with `input` or `output` null is UNPRICED: cost_usd is emitted as null
+# in the trace rather than a misleading zero. Fill these in before running
+# `bodol compare`, which ranks on cost.
+#
+# Keys are the undated model id. Anthropic returns a dated one
+# (claude-haiku-4-5-20251001); telemetry.events.pricing_key strips the suffix.
+#
+# `cached_input` is the cache-READ rate. Cache writes bill above the standard
+# input rate and are not modelled separately — see cost_usd() for the caveat.
 
 gemini:
-  gemini-2.0-flash:
-    input: 0.10
-    output: 0.40
-    cached_input: 0.025
-
-  gemini-2.0-flash-lite:
-    input: 0.075
-    output: 0.30
+  # TODO: unpriced. Captured in tests/fixtures/toolcalls/gemini_weather_*.json.
+  gemini-3.6-flash:
+    input: null
+    output: null
     cached_input: null
 
-  gemini-2.5-flash-lite:
+  gemini-2.0-flash:
     input: 0.10
     output: 0.40
     cached_input: 0.025
@@ -30,10 +35,30 @@ gemini:
 
   gemini-2.5-pro:
     # Tiered: prompts over 200k tokens bill at input 2.50 / output 15.00.
-    # Your cost function needs to know that, or long-context runs read cheap.
+    # A flat rate under-reports long-context runs.
     input: 1.25
     output: 10.00
     cached_input: 0.31
 
-# openai:
-# anthropic:
+openai:
+  # TODO: unpriced. Captured in tests/fixtures/toolcalls/openai_weather_*.json.
+  gpt-5.6-luna:
+    input: null
+    output: null
+    cached_input: null
+
+anthropic:
+  claude-haiku-4-5:
+    input: 1.00
+    output: 5.00
+    cached_input: 0.10
+
+  claude-opus-5:
+    input: 5.00
+    output: 25.00
+    cached_input: 0.50
+
+  claude-sonnet-5:
+    input: 3.00
+    output: 15.00
+    cached_input: 0.30
