@@ -29,7 +29,11 @@ class Sink(Protocol):
 
 
 class NullSink:
-    """Tracing off. Used when the CLI is run with --no-trace."""
+    """Tracing off, for callers that want none.
+
+    Not reachable from the CLI: create_provider always builds a JsonlSink, so
+    opting out would mean threading a flag through the provider factory.
+    """
 
     def emit(self, record: Mapping[str, Any]) -> None:
         return None

@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from pathlib import Path
 
 import httpx
 import pytest
@@ -70,7 +71,10 @@ async def test_create_provider_always_returns_traced_provider(
 
 def test_create_provider_wraps_missing_credentials(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_trace_dir: Path,
 ) -> None:
+    # The sink is created before credentials are checked, so without a
+    # redirected trace dir this test writes a stray file into traces/.
     for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
