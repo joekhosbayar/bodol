@@ -79,6 +79,7 @@ class ToolRegistry:
             raw = call.raw_args or "<missing>"
             return ToolResultBlock(
                 call_id=call.id,
+                name=call.name,
                 content=f"Invalid arguments for tool {call.name!r}: {raw}",
                 is_error=True,
             )
@@ -88,10 +89,11 @@ class ToolRegistry:
         except Exception as exc:
             return ToolResultBlock(
                 call_id=call.id,
+                name=call.name,
                 content=f"Tool {call.name!r} failed: {exc}",
                 is_error=True,
             )
-        return ToolResultBlock(call_id=call.id, content=_render_result(result))
+        return ToolResultBlock(call_id=call.id, name=call.name, content=_render_result(result))
 
     async def dispatch_all(self, calls: Sequence[ToolCall]) -> tuple[ToolResultBlock, ...]:
         """Execute independent calls concurrently, preserving input order."""

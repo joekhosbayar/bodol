@@ -93,6 +93,9 @@ async def test_dispatch_executes_sync_handler() -> None:
     result = await registry.dispatch(ToolCall("call_1", "weather", {"city": "Boston"}))
 
     assert result.call_id == "call_1"
+    # Gemini rejects a function_result that names no tool, so every result
+    # block carries the name — not only the ones the model can read an error in.
+    assert result.name == "weather"
     assert result.content == '{"city": "Boston", "temperature": 72}'
     assert not result.is_error
 
@@ -109,6 +112,7 @@ async def test_dispatch_invalid_args_returns_model_error() -> None:
     result = await registry.dispatch(ToolCall("call_1", "weather", None, '{"city":'))
 
     assert result.is_error
+    assert result.name == "weather"
     assert '{"city":' in result.content
 
 
@@ -127,6 +131,7 @@ async def test_dispatch_handler_failure_returns_model_error() -> None:
     result = await registry.dispatch(ToolCall("call_1", "fail", {}))
 
     assert result.is_error
+    assert result.name == "fail"
     assert "service unavailable" in result.content
 
 

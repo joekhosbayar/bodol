@@ -16,6 +16,7 @@ from bodol.providers.base import (
     Message,
     ModelResponse,
     TextBlock,
+    ThoughtBlock,
     ToolResultBlock,
     ToolSpec,
     ToolUseBlock,
@@ -48,7 +49,7 @@ def _tool_turn() -> list[Message]:
         ),
         Message(
             role="user",
-            content=(ToolResultBlock(call_id="t1", content="sunny"),),
+            content=(ToolResultBlock(call_id="t1", name="get_weather", content="sunny"),),
         ),
     ]
 
@@ -131,6 +132,34 @@ async def test_compact_keeps_task_and_recent_turns() -> None:
     assert "old followup" in prompt_block.text
     assert "the original task" not in prompt_block.text, "task is kept, not summarized"
     assert "recent reply" not in prompt_block.text, "recent turns are kept"
+
+
+async def test_signatures_are_not_summarized() -> None:
+    """A signature is conversation state, not content.
+
+    It has nothing a summary could carry, and putting it in the prompt would
+    spend tokens asking the model to describe a base64 blob it cannot read.
+    """
+    provider = FakeProvider()
+    manager = ContextManager(ContextPolicy(max_input_tokens=100, min_recent_turns=2))
+    messages = [
+        _text("user", "task"),
+        Message(
+            role="assistant",
+            content=(ThoughtBlock("EjQKMgERTTIPVtJXOu"), TextBlock(text="early reply")),
+        ),
+        _text("user", "old followup"),
+        _text("assistant", "recent reply"),
+        _text("user", "latest"),
+    ]
+
+    await manager.compact(messages, provider=provider)
+
+    (prompt_messages, _, _) = provider.calls[0]
+    (prompt_block,) = prompt_messages[0].content
+    assert isinstance(prompt_block, TextBlock)
+    assert "early reply" in prompt_block.text
+    assert "EjQKMgERTTIPVtJXOu" not in prompt_block.text
 
 
 async def test_compact_never_splits_tool_pair() -> None:

@@ -12,6 +12,7 @@ from bodol.providers.base import (
     Message,
     Provider,
     TextBlock,
+    ThoughtBlock,
     ToolResultBlock,
     ToolSpec,
     ToolUseBlock,
@@ -150,7 +151,10 @@ def test_a_malformed_call_can_still_be_replayed_as_history() -> None:
     items = openai._render_messages(
         [
             Message("assistant", (ToolUseBlock(bad.id, bad.name, {}, raw_args=bad.raw_args),)),
-            Message("user", (ToolResultBlock(bad.id, "arguments were not valid JSON", True),)),
+            Message(
+                "user",
+                (ToolResultBlock(bad.id, bad.name, "arguments were not valid JSON", True),),
+            ),
         ]
     )
     # The undecodable bytes go back verbatim — json.dumps({}) would rewrite them.
@@ -189,7 +193,10 @@ def test_renders_a_full_round_trip_as_items() -> None:
                 "assistant",
                 (ToolUseBlock("call_1", "get_weather", {"city": "Ulaanbaatar"}),),
             ),
-            Message("user", (ToolResultBlock("call_1", '{"temperature_c": 12}'),)),
+            Message(
+                "user",
+                (ToolResultBlock("call_1", "get_weather", '{"temperature_c": 12}'),),
+            ),
         ]
     )
 
@@ -203,6 +210,16 @@ def test_renders_a_full_round_trip_as_items() -> None:
         "call_id": "call_1",
         "output": '{"temperature_c": 12}',
     }
+
+
+def test_signed_reasoning_is_dropped() -> None:
+    """Gemini's signatures mean nothing here, and OpenAI's own reasoning items
+    are a different shape (an id plus encrypted content), so the block is
+    dropped rather than translated."""
+    items = openai._render_messages(
+        [Message("assistant", (ThoughtBlock("EjQKMgERTTIPVtJXOu"), TextBlock("hi")))]
+    )
+    assert items == [{"role": "assistant", "content": "hi"}]
 
 
 def test_tool_call_args_survive_a_parse_render_round_trip() -> None:

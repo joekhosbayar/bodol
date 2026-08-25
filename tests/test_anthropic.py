@@ -12,6 +12,7 @@ from bodol.providers.base import (
     Message,
     Provider,
     TextBlock,
+    ThoughtBlock,
     ToolResultBlock,
     ToolSpec,
     ToolUseBlock,
@@ -122,7 +123,10 @@ def test_renders_a_full_round_trip() -> None:
                 "assistant",
                 (ToolUseBlock("toolu_1", "get_weather", {"city": "Ulaanbaatar"}),),
             ),
-            Message("user", (ToolResultBlock("toolu_1", '{"temperature_c": 12}'),)),
+            Message(
+                "user",
+                (ToolResultBlock("toolu_1", "get_weather", '{"temperature_c": 12}'),),
+            ),
         ]
     )
 
@@ -141,9 +145,18 @@ def test_renders_a_full_round_trip() -> None:
 
 def test_error_tool_results_are_flagged() -> None:
     rendered = anthropic._render_messages(
-        [Message("user", (ToolResultBlock("toolu_1", "not valid JSON", True),))]
+        [Message("user", (ToolResultBlock("toolu_1", "get_weather", "not valid JSON", True),))]
     )
     assert rendered[0]["content"][0]["is_error"] is True
+
+
+def test_signed_reasoning_is_dropped() -> None:
+    """A bare signature is not an Anthropic `thinking` block, and sending it as
+    one would fail the request. See the KNOWN GAP in the adapter's docstring."""
+    rendered = anthropic._render_messages(
+        [Message("assistant", (ThoughtBlock("EjQKMgERTTIPVtJXOu"), TextBlock("hi")))]
+    )
+    assert rendered == [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]
 
 
 def test_tools_use_input_schema_not_parameters() -> None:

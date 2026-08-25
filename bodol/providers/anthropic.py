@@ -14,10 +14,12 @@ is no `tool` role.
 
 KNOWN GAP: models that return `thinking` blocks (Opus 5 and friends, where
 adaptive thinking is on by default) require those blocks echoed back verbatim,
-signature included. Bodol's ContentBlock union cannot represent one, so such a
-model will fail on the second step of a tool-using conversation. Adding an
-opaque passthrough block is the fix; claude-haiku-4-5 does not emit them, so it
-is not needed yet.
+signature included. `ThoughtBlock` is not that block — it carries a signature
+and nothing else, while a `thinking` block carries the thinking text the
+signature signs, and normalize() here captures neither. So such a model still
+fails on the second step of a tool-using conversation. Gemini failed the same
+way until the signed step was replayed; the fix here is the same shape, plus a
+text field. claude-haiku-4-5 does not emit them, so it is not needed yet.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from bodol.providers.base import (
     Message,
     ModelResponse,
     TextBlock,
+    ThoughtBlock,
     ToolCall,
     ToolResultBlock,
     ToolSpec,
@@ -161,6 +164,11 @@ def _render_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
                             "is_error": block.is_error,
                         }
                     )
+                case ThoughtBlock():
+                    # Dropped: a bare signature is not a valid `thinking` block
+                    # here, and sending one would fail the request rather than
+                    # preserve anything. See the KNOWN GAP above.
+                    continue
         rendered.append({"role": msg.role, "content": content})
     return rendered
 

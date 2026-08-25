@@ -15,6 +15,7 @@ from bodol.providers.base import (
     Message,
     ModelResponse,
     TextBlock,
+    ThoughtBlock,
     ToolCall,
     ToolResultBlock,
     ToolSpec,
@@ -29,6 +30,7 @@ def _response(
     *,
     text: str | None = None,
     tool_calls: tuple[ToolCall, ...] = (),
+    thoughts: tuple[ThoughtBlock, ...] = (),
     finish_reason: FinishReason | None = None,
     input_tokens: int = 100,
     output_tokens: int = 10,
@@ -44,6 +46,7 @@ def _response(
         latency_ms=1.0,
         text=text,
         tool_calls=tool_calls,
+        thoughts=thoughts,
     )
 
 
@@ -169,11 +172,45 @@ async def test_tool_round_trip_builds_history(install: InstallProvider) -> None:
         TextBlock(text="looking that up"),
         ToolUseBlock(id="t1", name="get_weather", args={"city": "Boston"}),
     )
-    assert result.messages[2].content == (ToolResultBlock(call_id="t1", content="sunny in Boston"),)
+    assert result.messages[2].content == (
+        ToolResultBlock(call_id="t1", name="get_weather", content="sunny in Boston"),
+    )
 
     second_messages = provider.calls[1][0]
     assert len(second_messages) == 3, "the second call sees the whole round trip"
     assert provider.steps == [1, 2], "one step per model call"
+
+
+async def test_signed_reasoning_is_replayed_ahead_of_the_call(install: InstallProvider) -> None:
+    """The loop's half of the Gemini turn-2 fix.
+
+    Gemini validates a replayed function_call against the thought step that
+    preceded it, so the signed blocks lead the echoed assistant turn — ahead of
+    prose as well as the calls themselves.
+    """
+    signed = ThoughtBlock("EjQKMgERTTIPVtJXOu")
+    provider = install(
+        FakeProvider(
+            [
+                _response(
+                    text="looking that up",
+                    tool_calls=(_tool_call(),),
+                    thoughts=(signed,),
+                ),
+                _response(text="It is sunny."),
+            ]
+        )
+    )
+
+    result = await Agent("fake:fake-model", tools=_weather_registry()).run("weather in Boston?")
+
+    assert result.messages[1].content == (
+        signed,
+        TextBlock(text="looking that up"),
+        ToolUseBlock(id="t1", name="get_weather", args={"city": "Boston"}),
+    )
+    # And the next call is handed that order, which is what the vendor checks.
+    assert provider.calls[1][0][1].content[0] is signed
 
 
 async def test_tool_results_follow_the_models_order(install: InstallProvider) -> None:
