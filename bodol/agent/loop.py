@@ -19,6 +19,15 @@ propagate rather than masquerading as a run outcome.
 discovering the budget is blown by having already blown it. `max_steps=0`
 returns immediately without calling anything.
 
+That check cannot prevent every overrun, and pretending otherwise would be the
+worse failure. `max_seconds` bounds the gaps between calls; a retry policy
+bounds the inside of one call. They are two clocks, so a call that starts at
+second 58 of a 120-second budget may legally run to second 131 — and if it ends
+on an error, the limit check never runs again to notice. So the elapsed time is
+compared against the budget on **every** exit path and an overrun is reported.
+Until the run's remaining time is handed down into the call itself, this is a
+warning rather than a guarantee, and it says so out loud.
+
 **A step is a model call.** The two provider calls of a tool round-trip share
 one step number, which is what makes a trace readable: step 3 is one turn of
 thinking, whether or not it also ran four tools.
@@ -32,6 +41,7 @@ instead, and `max_cost` simply cannot fire for such a model — `max_steps` and
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -56,6 +66,8 @@ from bodol.tools import ToolRegistry
 # Aliased so a test can install a deterministic clock here instead of replacing
 # `time.monotonic` globally, which the event loop is also using to schedule.
 _monotonic = time.monotonic
+
+logger = logging.getLogger(__name__)
 
 
 class StopReason(StrEnum):
@@ -197,6 +209,21 @@ class Agent:
                 text: str | None = None,
                 error: str | None = None,
             ) -> RunResult:
+                # Every stop path funnels through here, which is the point: the
+                # overshoot has to be reported even when the run ended for some
+                # other reason. A 429 sequence that pushed a run to 130s of a
+                # 120s budget stops on ERROR, never re-reaches the limit check,
+                # and would otherwise leave no sign that the budget was passed.
+                elapsed = _monotonic() - started
+                if elapsed > self.limits.max_seconds:
+                    logger.warning(
+                        "time budget exceeded: the run took %.1fs against a %gs "
+                        "limit. Limits are checked between model calls, so a "
+                        "call that starts inside the budget can finish outside "
+                        "it — retries and their waits happen inside one call.",
+                        elapsed,
+                        self.limits.max_seconds,
+                    )
                 return RunResult(
                     text=text,
                     stop_reason=reason,
