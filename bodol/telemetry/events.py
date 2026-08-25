@@ -177,6 +177,50 @@ def call_record(response: ModelResponse) -> dict[str, Any]:
     }
 
 
+def retry_record(
+    provider: str,
+    model: str,
+    *,
+    attempt: int,
+    of: int,
+    status: int | None,
+    latency_ms: float,
+    delay_s: float | None,
+    detail: str,
+) -> dict[str, Any]:
+    """One JSONL row per failed HTTP attempt.
+
+    Retries used to leave nothing behind. A call that spent 313 seconds across
+    four attempts wrote a single error row carrying the total, with no way to
+    tell whether that was one slow response or four — which is exactly the
+    question you need answered to know if the provider is degraded or the client
+    is misconfigured.
+
+    `retry_in_s` is null on the attempt the caller's exception came from.
+    `cost_usd` is null for the same reason it is on an error row: a failed
+    attempt may still have been billed, and writing zero would be a lie in the
+    direction that flatters us.
+
+    Takes primitives rather than the HTTP layer's `Attempt`, so telemetry keeps
+    depending on `providers.base` and nothing else under `providers`.
+    """
+    return {
+        "ts": _now(),
+        "trace_id": current_trace_id(),
+        "step": current_step(),
+        "event": "retry",
+        "provider": provider,
+        "model": model,
+        "attempt": attempt,
+        "of": of,
+        "error_status": status,
+        "latency_ms": round(latency_ms, 2),
+        "retry_in_s": round(delay_s, 2) if delay_s is not None else None,
+        "detail": detail[:500],
+        "cost_usd": None,
+    }
+
+
 def error_record(
     provider: str, model: str, exc: BaseException, *, latency_ms: float | None = None
 ) -> dict[str, Any]:

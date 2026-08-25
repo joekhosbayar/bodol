@@ -355,7 +355,8 @@ async def test_unpriced_model_cannot_trip_max_cost(
 async def test_max_seconds_stops_the_loop(
     install: InstallProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ticks = iter((0.0, 0.0, 5.0, 11.0))
+    # start, three limit checks, then the reading `result` takes on the way out.
+    ticks = iter((0.0, 0.0, 5.0, 11.0, 11.0))
     monkeypatch.setattr(loop_module, "_monotonic", lambda: next(ticks, 999.0))
     install(FakeProvider(repeat=_response(tool_calls=(_tool_call(),))))
     agent = Agent(
@@ -368,6 +369,62 @@ async def test_max_seconds_stops_the_loop(
 
     assert result.stop_reason is StopReason.MAX_SECONDS
     assert result.steps == 2
+
+
+async def test_the_overshoot_past_max_seconds_is_named(
+    install: InstallProvider, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Stopping for time is in the stop reason; how far past the line is not.
+
+    The gap between the budget and the elapsed time is the size of the hole,
+    and it is the only way to see that one call ran long past the deadline.
+    """
+    ticks = iter((0.0, 0.0, 5.0, 31.0, 31.0))
+    monkeypatch.setattr(loop_module, "_monotonic", lambda: next(ticks, 999.0))
+    install(FakeProvider(repeat=_response(tool_calls=(_tool_call(),))))
+    agent = Agent(
+        "fake:fake-model",
+        tools=_weather_registry(),
+        limits=Limits(max_steps=99, max_seconds=10.0),
+    )
+
+    with caplog.at_level("WARNING", logger="bodol.agent.loop"):
+        await agent.run("take too long")
+
+    message = caplog.records[0].getMessage()
+    assert "31.0s" in message, "what it actually took"
+    assert "10s" in message, "against what it was allowed"
+
+
+async def test_a_failed_run_still_reports_a_blown_time_budget(
+    install: InstallProvider, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real case this exists for.
+
+    A retry sequence inside one call pushed a run past its budget and then the
+    call failed. The stop reason is ERROR, the limit check never runs again,
+    and without a report on the way out the overrun leaves no trace at all.
+    """
+    ticks = iter((0.0, 0.0, 130.0))
+    monkeypatch.setattr(loop_module, "_monotonic", lambda: next(ticks, 999.0))
+    install(FakeProvider(raises=RuntimeError("HTTP 429 after 2 attempts and 72.2s")))
+    agent = Agent("fake:fake-model", limits=Limits(max_seconds=120.0))
+
+    result = await agent.run("get rate limited")
+
+    assert result.stop_reason is StopReason.ERROR, "the run ended on the error, not the clock"
+    assert "130.0s" in caplog.records[0].getMessage()
+    assert "120s" in caplog.records[0].getMessage()
+
+
+async def test_a_run_inside_its_budget_says_nothing(
+    install: InstallProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    install(FakeProvider([_response(text="fast")]))
+
+    await Agent("fake:fake-model").run("be quick")
+
+    assert caplog.records == [], "a budget kept is not news"
 
 
 async def test_usage_is_summed_across_calls(install: InstallProvider) -> None:
