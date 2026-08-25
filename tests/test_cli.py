@@ -8,6 +8,7 @@ exactly the boundary cli.py owns.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -56,10 +57,14 @@ class StubAgent:
         self.tasks: list[str] = []
         self.result = _result()
         self.raises: Exception | None = None
+        # Stands in for the HTTP layer announcing a retry mid-run.
+        self.warns: str | None = None
         StubAgent.last = self
 
     async def run(self, task: str) -> RunResult:
         self.tasks.append(task)
+        if self.warns is not None:
+            logging.getLogger("bodol.providers.http").warning(self.warns)
         if self.raises is not None:
             raise self.raises
         return self.result
@@ -76,10 +81,11 @@ def agent(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
             stub.result = shape["result"]
         if shape["raises"] is not None:
             stub.raises = shape["raises"]
+        stub.warns = shape["warns"]
         created.append(stub)
         return stub
 
-    shape: dict[str, Any] = {"result": None, "raises": None}
+    shape: dict[str, Any] = {"result": None, "raises": None, "warns": None}
     monkeypatch.setattr(cli, "Agent", factory)
     return type("Hook", (), {"shape": shape, "created": created})()
 
@@ -179,6 +185,30 @@ def test_answer_on_stdout_summary_on_stderr(agent) -> None:  # type: ignore[no-u
     assert "$0.0042" in result.stderr
     assert "1,234 tokens" in result.stderr
     assert str(config.TRACE_DIR / "tr_abc123.jsonl") in result.stderr
+
+
+def test_a_retry_is_visible_while_the_run_is_still_going(agent) -> None:  # type: ignore[no-untyped-def]
+    """A silent five-minute retry sequence looks exactly like a hung process.
+
+    The HTTP layer logs because a library must not own stdio; the CLI is what
+    decides those lines reach a terminal, and in whose voice.
+    """
+    agent.shape["warns"] = "retry 1/4 · HTTP 500 · waiting 2.0s · high demand"
+
+    result = runner.invoke(cli.app, ["run", "hello"])
+
+    assert "  retry 1/4 · HTTP 500 · waiting 2.0s · high demand" in result.stderr
+
+
+def test_the_log_handler_does_not_outlive_the_run(agent) -> None:  # type: ignore[no-untyped-def]
+    """A StreamHandler captures the stream it was built with.
+
+    Leaving one attached to a module-level logger means the next writer in the
+    process ends up writing into a pipe that has already closed.
+    """
+    runner.invoke(cli.app, ["run", "hello"])
+
+    assert logging.getLogger("bodol").handlers == []
 
 
 def test_missing_text_is_reported_without_pretending(agent) -> None:  # type: ignore[no-untyped-def]

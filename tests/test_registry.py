@@ -1,8 +1,10 @@
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
+import respx
 
 from bodol.providers import (
     InvalidProviderSpecError,
@@ -10,12 +12,15 @@ from bodol.providers import (
     ProviderCredentialError,
     UnsupportedProviderError,
     create_provider,
+    gemini,
     parse_provider_spec,
 )
 from bodol.providers.base import FinishReason, Message, ModelResponse, ToolSpec, Usage
+from bodol.providers.http import RetryPolicy
 from bodol.telemetry import events
 from bodol.telemetry.middleware import TracedProvider
 from bodol.telemetry.writer import MemorySink
+from tests.conftest import load
 
 
 @pytest.mark.parametrize(
@@ -129,3 +134,64 @@ async def test_factory_sink_receives_telemetry(
 
     assert len(sink.records) == 1
     assert sink.records[0]["event"] == "call"
+
+
+@respx.mock
+async def test_retried_attempts_land_in_the_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The only place this wiring can happen.
+
+    `TracedProvider` wraps `generate()` and sees one outcome, while the attempts
+    happen a layer below inside `post_json`. Without this, a call that spent five
+    minutes across four attempts left a single row carrying the total.
+    """
+    sink = MemorySink()
+    monkeypatch.setattr("bodol.providers.registry._make_sink", lambda _: sink)
+    respx.post(f"{gemini.BASE_URL}{gemini.ENDPOINT}").mock(
+        side_effect=[
+            httpx.Response(503, json={"error": {"message": "high demand"}}),
+            httpx.Response(200, json=load("toolcalls/gemini_weather_1")),
+        ]
+    )
+
+    with events.start_trace("tr_registry_retry"):
+        events.advance_step()
+        provider = create_provider(
+            "gemini:gemini-3.6-flash",
+            api_key="key",
+            # No jitter and no wait: this test is about the record, not the clock.
+            retry=RetryPolicy(initial_backoff=0.0, jitter=0.0),
+        )
+        await provider.generate([])
+        await provider.aclose()
+
+    assert [r["event"] for r in sink.records] == ["retry", "call"]
+    retry = sink.records[0]
+    assert retry["attempt"] == 1
+    assert retry["of"] == 4
+    assert retry["error_status"] == 503
+    assert retry["detail"] == "high demand"
+    assert retry["retry_in_s"] == 0.0, "recorded the wait it was about to take"
+    assert retry["cost_usd"] is None, "a failed attempt may still have been billed"
+    assert retry["step"] == 1, "attributed to the step that caused it"
+
+
+def test_a_callers_own_attempt_hook_is_not_overwritten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracing is the default, not an imposition."""
+    seen: list[object] = []
+    # Bound once: `seen.append` is a fresh object on every attribute access.
+    hook = seen.append
+    captured: dict[str, Any] = {}
+
+    def adapter(*args: Any, **kwargs: Any) -> _FakeProvider:
+        captured.update(kwargs)
+        return _FakeProvider()
+
+    monkeypatch.setattr("bodol.providers.registry._make_sink", lambda _: MemorySink())
+    monkeypatch.setattr("bodol.providers.registry.gemini.GeminiAdapter", adapter)
+
+    with events.start_trace("tr_registry_hook"):
+        create_provider("gemini:model", api_key="key", retry=RetryPolicy(on_attempt=hook))
+
+    assert captured["retry"].on_attempt is hook
