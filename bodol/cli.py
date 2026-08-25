@@ -17,8 +17,11 @@ terminal.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
@@ -99,6 +102,37 @@ def _report(result: RunResult) -> None:
         typer.secho(f"  {result.error}", fg=typer.colors.RED, err=True)
 
 
+@contextlib.contextmanager
+def _live_warnings() -> Iterator[None]:
+    """Show the library's warnings on stderr while the run is in progress.
+
+    The HTTP layer cannot print: a library that owns stdio is a library you
+    cannot embed. So it logs, and this — the one place that does own the
+    terminal — decides that a retry is worth watching and what it looks like.
+
+    Scoped to the run rather than installed once at startup, because a
+    `StreamHandler` captures the stream it was built with. A handler that
+    outlives the command it was built for goes on writing into a pipe that has
+    since closed, which is how this was found.
+    """
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("  %(message)s"))
+    library = logging.getLogger("bodol")
+    level, propagate = library.level, library.propagate
+    library.addHandler(handler)
+    library.setLevel(logging.WARNING)
+    # Ours is the only handler that should print these; an embedding app's root
+    # configuration would otherwise show each line twice.
+    library.propagate = False
+    try:
+        yield
+    finally:
+        library.removeHandler(handler)
+        library.setLevel(level)
+        library.propagate = propagate
+        handler.close()
+
+
 @app.callback()
 def main(
     version: Annotated[
@@ -155,7 +189,8 @@ def run(
         context=policy,
     )
     try:
-        result = asyncio.run(agent.run(task))
+        with _live_warnings():
+            result = asyncio.run(agent.run(task))
     except ProviderRegistryError as exc:
         _die(str(exc))
 

@@ -13,17 +13,23 @@ format stays visible.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import re
 import textwrap
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
+
+# A library does not own stdio. This layer reports a retry and leaves the
+# decision about whether a human should see it to whoever configured logging —
+# `bodol/cli.py` attaches a stderr handler; an embedding application need not.
+logger = logging.getLogger(__name__)
 
 # Generous read timeout: a long tool-calling turn on a large context can sit
 # quiet for a while. Connect stays short — a slow connect is a dead host.
@@ -55,6 +61,22 @@ class PermanentError(ProviderHTTPError):
 
 
 @dataclass(frozen=True, slots=True)
+class Attempt:
+    """One HTTP attempt that failed, reported as it happens.
+
+    `delay_s` is the wait before the next attempt, or None when there will not
+    be one — so a None here marks the attempt the caller's exception came from.
+    """
+
+    number: int
+    of: int
+    status: int | None
+    latency_ms: float
+    delay_s: float | None
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
 class RetryPolicy:
     max_attempts: int = 4
     initial_backoff: float = 0.5
@@ -64,9 +86,26 @@ class RetryPolicy:
     # runs from re-colliding in lockstep after a shared 429.
     jitter: float = 0.3
     retry_on: frozenset[int] = RETRYABLE_STATUS
-    # Cap on Retry-After. Providers occasionally hand back minutes; without this
-    # a single 429 silently blows through the agent's max_seconds budget.
+    # Cap on a single wait, whether the provider asked for it by header or in
+    # prose. Providers occasionally hand back minutes.
     max_retry_after: float = 60.0
+    # Ceiling on the whole sequence: attempts, waits, and any attempt still in
+    # flight. Deliberately sits between the two numbers around it — above
+    # `max_retry_after`, so one honored provider delay can still complete, and
+    # below the CLI's 120s default `max_seconds`, so a single call cannot eat a
+    # whole run's time budget.
+    #
+    # It bounds each attempt's timeout too, not just the decision to start one.
+    # Without that, a provider holding a request open for 78 seconds (Gemini
+    # does, under load) overruns the budget inside one attempt: four of those
+    # took a nominally 120-second run to 313 seconds.
+    #
+    # None disables the ceiling for a caller that wants the older behavior.
+    max_total_seconds: float | None = 90.0
+    # Called for every failed attempt. Kept on the policy rather than threaded
+    # through three adapters as an argument: `create_provider` already builds
+    # this object and already holds the trace sink.
+    on_attempt: Callable[[Attempt], None] | None = None
 
 
 DEFAULT_RETRY = RetryPolicy()
@@ -116,6 +155,10 @@ def _parse_body(response: httpx.Response) -> Any:
 # that was exceeded, and the quota is the only part worth reading. Still bounded,
 # because an HTML error page must not become the error text.
 MAX_DETAIL = 500
+
+# The live retry notice keeps only enough to recognize the failure: it already
+# states the wait separately, and it competes with a terminal's width.
+NOTICE_DETAIL = 120
 
 
 def _clamp(text: str, width: int = MAX_DETAIL) -> str:
@@ -202,6 +245,28 @@ def _backoff(attempt: int, policy: RetryPolicy) -> float:
     return base * random.uniform(1.0 - policy.jitter, 1.0 + policy.jitter)
 
 
+def _attempt_timeout(base: httpx.Timeout, remaining: float | None) -> httpx.Timeout:
+    """Clamp one attempt's timeouts to the retry budget that is left.
+
+    The deadline has to reach inside the attempt, not merely decide whether to
+    start another one. A provider that holds a request open for 78 seconds
+    overruns a 90-second budget on its own, and four of them turned a
+    120-second run into 313 seconds.
+    """
+    if remaining is None:
+        return base
+
+    def clamp(value: float | None) -> float | None:
+        return remaining if value is None else min(value, remaining)
+
+    return httpx.Timeout(
+        connect=clamp(base.connect),
+        read=clamp(base.read),
+        write=clamp(base.write),
+        pool=clamp(base.pool),
+    )
+
+
 async def post_json(
     client: httpx.AsyncClient,
     url: str,
@@ -213,30 +278,82 @@ async def post_json(
     """POST JSON, retrying transient failures, and return the decoded body with timings.
 
     Raises PermanentError for 4xx that won't improve, TransientError when retries
-    run out or the transport keeps failing.
+    run out, the transport keeps failing, or the retry budget is spent.
+
+    Every failed attempt is reported twice on the way past: to `policy.on_attempt`
+    for the trace, and to this module's logger for whoever is watching. A silent
+    five-minute retry sequence is indistinguishable from a hung process.
 
     Note on cost: a request that timed out client-side may still have been billed
     server-side. Retries can therefore cost money that never shows up in a
     response you got to read. If your spend and your traces disagree, look here
-    first — consider logging every attempt, not just the one that returned.
+    first — the per-attempt records are what make that visible.
     """
     started_total = time.perf_counter()
-    last_error: Exception | None = None
+    deadline = (
+        None if policy.max_total_seconds is None else started_total + policy.max_total_seconds
+    )
+
+    def elapsed() -> float:
+        return time.perf_counter() - started_total
+
+    def report(
+        attempt: int, status: int | None, latency_ms: float, delay: float | None, detail: str
+    ) -> None:
+        if policy.on_attempt is not None:
+            policy.on_attempt(
+                Attempt(
+                    number=attempt,
+                    of=policy.max_attempts,
+                    status=status,
+                    latency_ms=round(latency_ms, 2),
+                    delay_s=delay,
+                    detail=detail,
+                )
+            )
+        # Only the waits are announced. A failure with nothing left to try is
+        # about to be raised, and the caller reports that in its own words.
+        if delay is not None:
+            logger.warning(
+                "retry %d/%d · %s · waiting %.1fs · %s",
+                attempt,
+                policy.max_attempts,
+                f"HTTP {status}" if status is not None else "transport failure",
+                delay,
+                # Shorter than the exception's detail on purpose. This line is
+                # for recognizing the problem at a glance while the wait runs;
+                # the full text is in the trace and in the final error, and a
+                # vendor paragraph wrapped across a terminal reads as noise.
+                _clamp(detail, NOTICE_DETAIL) if detail else url,
+            )
+
+    def out_of_budget(delay: float) -> bool:
+        return deadline is not None and time.perf_counter() + delay >= deadline
 
     for attempt in range(1, policy.max_attempts + 1):
+        remaining = None if deadline is None else max(deadline - time.perf_counter(), 0.0)
         started = time.perf_counter()
         try:
-            response = await client.post(url, json=payload, headers=dict(headers or {}))
+            response = await client.post(
+                url,
+                json=payload,
+                headers=dict(headers or {}),
+                timeout=_attempt_timeout(client.timeout, remaining),
+            )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            last_error = exc
-            if attempt == policy.max_attempts:
+            latency_ms = (time.perf_counter() - started) * 1000
+            delay = _backoff(attempt, policy)
+            last = attempt == policy.max_attempts or out_of_budget(delay)
+            report(attempt, None, latency_ms, None if last else delay, repr(exc))
+            if last:
                 raise TransientError(
-                    f"transport failure after {attempt} attempts: {exc!r}",
+                    f"transport failure after {attempt} attempts"
+                    f" and {elapsed():.1f}s: {exc!r}",
                     status=None,
                     body=None,
                     url=url,
                 ) from exc
-            await asyncio.sleep(_backoff(attempt, policy))
+            await asyncio.sleep(delay)
             continue
 
         latency_ms = (time.perf_counter() - started) * 1000
@@ -258,6 +375,7 @@ async def post_json(
         said = f": {detail}" if detail else ""
 
         if response.status_code not in policy.retry_on:
+            report(attempt, response.status_code, latency_ms, None, detail)
             raise PermanentError(
                 f"HTTP {response.status_code} from {url}{said}",
                 status=response.status_code,
@@ -265,18 +383,37 @@ async def post_json(
                 url=url,
             )
 
+        # Header first, the vendor's own prose second, blind backoff last.
+        asked_for = _retry_after_seconds(response, policy)
+        if asked_for is None:
+            asked_for = _retry_hint_seconds(detail, policy)
+        delay = asked_for if asked_for is not None else _backoff(attempt, policy)
+
         if attempt == policy.max_attempts:
+            report(attempt, response.status_code, latency_ms, None, detail)
             raise TransientError(
-                f"HTTP {response.status_code} from {url} after {attempt} attempts{said}",
+                f"HTTP {response.status_code} from {url}"
+                f" after {attempt} attempts and {elapsed():.1f}s{said}",
                 status=response.status_code,
                 body=body,
                 url=url,
             )
 
-        # Header first, the vendor's own prose second, blind backoff last.
-        delay = _retry_after_seconds(response, policy)
-        if delay is None:
-            delay = _retry_hint_seconds(detail, policy)
-        await asyncio.sleep(delay if delay is not None else _backoff(attempt, policy))
+        if out_of_budget(delay):
+            # Stopping here rather than waiting is the point of the budget: the
+            # provider is asking for more time than this call is allowed to
+            # spend, and finding that out late costs the caller the difference.
+            report(attempt, response.status_code, latency_ms, None, detail)
+            raise TransientError(
+                f"HTTP {response.status_code} from {url} after {attempt} attempts"
+                f" and {elapsed():.1f}s; a {delay:.1f}s wait would exceed the"
+                f" {policy.max_total_seconds:.0f}s retry budget{said}",
+                status=response.status_code,
+                body=body,
+                url=url,
+            )
 
-    raise AssertionError(f"unreachable: retry loop exited without result ({last_error!r})")
+        report(attempt, response.status_code, latency_ms, delay, detail)
+        await asyncio.sleep(delay)
+
+    raise AssertionError("unreachable: retry loop exited without a result")

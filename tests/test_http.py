@@ -220,8 +220,168 @@ async def test_exhausted_retries_also_say_why(no_sleep: list[float]) -> None:
     )
 
     async with http.make_client() as client:
-        with pytest.raises(http.TransientError, match="after 2 attempts: quota exceeded"):
+        with pytest.raises(http.TransientError, match=r"after 2 attempts and [\d.]+s: quota"):
             await http.post_json(client, URL, {}, policy=http.RetryPolicy(max_attempts=2))
+
+
+@respx.mock
+async def test_the_retry_budget_refuses_a_wait_it_cannot_afford(no_sleep: list[float]) -> None:
+    """A provider asking for more time than the call is allowed to spend.
+
+    Honoring the 60s hint here would blow the budget and then still have three
+    attempts to go. Better to stop at once and say why: the caller learns the
+    real problem in a second instead of discovering it four minutes later.
+    """
+    respx.post(URL).mock(
+        return_value=httpx.Response(429, json={"error": {"message": "Please retry in 60s."}})
+    )
+    policy = http.RetryPolicy(max_total_seconds=10.0)
+
+    async with http.make_client() as client:
+        with pytest.raises(http.TransientError, match="would exceed the 10s retry budget"):
+            await http.post_json(client, URL, {}, policy=policy)
+
+    assert no_sleep == [], "gave up instead of sleeping past the budget"
+
+
+@respx.mock
+async def test_each_attempt_is_bounded_by_the_budget_that_is_left() -> None:
+    """The 313-second run: four attempts a provider held open for ~78s each.
+
+    A deadline that only gates whether to *start* an attempt cannot stop that,
+    so the remaining budget is pushed down into the request's own timeout.
+    """
+    seen: list[dict[str, float | None]] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        return httpx.Response(200, json={})
+
+    respx.post(URL).mock(side_effect=capture)
+
+    async with http.make_client() as client:
+        await http.post_json(client, URL, {}, policy=http.RetryPolicy(max_total_seconds=5.0))
+
+    read = seen[0]["read"]
+    assert read is not None and read <= 5.0, "read timeout clamped to the budget"
+    connect = seen[0]["connect"]
+    assert connect is not None and connect <= 10.0, "a short connect timeout is not widened"
+
+
+@respx.mock
+async def test_no_budget_leaves_the_client_timeout_alone(no_sleep: list[float]) -> None:
+    seen: list[dict[str, float | None]] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        return httpx.Response(200, json={})
+
+    respx.post(URL).mock(side_effect=capture)
+
+    async with http.make_client() as client:
+        await http.post_json(client, URL, {}, policy=http.RetryPolicy(max_total_seconds=None))
+
+    assert seen[0]["read"] == http.DEFAULT_TIMEOUT.read
+
+
+@respx.mock
+async def test_every_failed_attempt_is_reported(no_sleep: list[float]) -> None:
+    """What the trace needs: per-attempt status and latency, not just a total."""
+    attempts: list[http.Attempt] = []
+    respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(503, json={"error": {"message": "high demand"}}),
+            httpx.Response(503, json={"error": {"message": "high demand"}}),
+            httpx.Response(200, json={"ok": True}),
+        ]
+    )
+    policy = http.RetryPolicy(on_attempt=attempts.append)
+
+    async with http.make_client() as client:
+        result = await http.post_json(client, URL, {}, policy=policy)
+
+    assert result.attempts == 3
+    assert [a.number for a in attempts] == [1, 2], "only failures are reported"
+    assert [a.status for a in attempts] == [503, 503]
+    assert [a.detail for a in attempts] == ["high demand", "high demand"]
+    assert all(a.delay_s is not None for a in attempts), "each one is about to be retried"
+    assert all(a.of == 4 for a in attempts)
+
+
+@respx.mock
+async def test_the_last_attempt_reports_no_delay(no_sleep: list[float]) -> None:
+    """`delay_s is None` marks the attempt the caller's exception came from."""
+    attempts: list[http.Attempt] = []
+    respx.post(URL).mock(return_value=httpx.Response(500, json={"error": "boom"}))
+    policy = http.RetryPolicy(max_attempts=2, on_attempt=attempts.append)
+
+    async with http.make_client() as client:
+        with pytest.raises(http.TransientError):
+            await http.post_json(client, URL, {}, policy=policy)
+
+    assert [a.delay_s is None for a in attempts] == [False, True]
+
+
+@respx.mock
+async def test_a_permanent_failure_is_reported_once(no_sleep: list[float]) -> None:
+    attempts: list[http.Attempt] = []
+    respx.post(URL).mock(return_value=httpx.Response(400, json={"error": "bad model"}))
+
+    policy = http.RetryPolicy(on_attempt=attempts.append)
+    async with http.make_client() as client:
+        with pytest.raises(http.PermanentError):
+            await http.post_json(client, URL, {}, policy=policy)
+
+    assert len(attempts) == 1
+    assert attempts[0].delay_s is None
+    assert no_sleep == []
+
+
+@respx.mock
+async def test_a_wait_is_announced_but_a_final_failure_is_not(
+    no_sleep: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Five silent minutes is indistinguishable from a hung process.
+
+    The final failure stays quiet: it is about to be raised, and the caller
+    reports it in its own words.
+    """
+    respx.post(URL).mock(
+        return_value=httpx.Response(503, json={"error": {"message": "high demand"}})
+    )
+
+    with caplog.at_level("WARNING", logger="bodol.providers.http"):
+        async with http.make_client() as client:
+            with pytest.raises(http.TransientError):
+                await http.post_json(client, URL, {}, policy=http.RetryPolicy(max_attempts=2))
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "retry 1/2" in message
+    assert "HTTP 503" in message
+    assert "high demand" in message
+
+
+@respx.mock
+async def test_the_live_notice_stays_one_line(
+    no_sleep: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Google's quota message is a paragraph. It belongs in the trace, not
+    wrapped across four terminal rows while the user waits."""
+    respx.post(URL).mock(
+        return_value=httpx.Response(
+            429, json={"error": {"message": "You exceeded your current quota. " * 20}}
+        )
+    )
+
+    with caplog.at_level("WARNING", logger="bodol.providers.http"):
+        async with http.make_client() as client:
+            with pytest.raises(http.TransientError):
+                await http.post_json(client, URL, {}, policy=http.RetryPolicy(max_attempts=2))
+
+    notice = caplog.records[0].getMessage()
+    assert len(notice) < http.MAX_DETAIL, "shorter than what the exception carries"
+    assert notice.endswith("…")
 
 
 @pytest.mark.parametrize(
