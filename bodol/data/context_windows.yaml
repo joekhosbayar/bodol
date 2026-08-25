@@ -4,33 +4,37 @@
 # VERIFY BEFORE TRUSTING. Windows change between model generations:
 #   gemini    https://ai.google.dev/gemini-api/docs/models
 #   openai    https://platform.openai.com/docs/models
-#   anthropic https://platform.claude.com/docs/en/about-claude/models
+#   anthropic https://platform.claude.com/docs/en/models/overview
+# Values below were read from those pages on 2026-08-25.
 #
 # A `null` window means UNKNOWN, not unlimited. `context.windows.policy_for`
 # returns None for it, so compaction stays off rather than being sized from a
 # guess — the same choice cost_usd makes for an unpriced model.
 #
 # Keys are the undated model id; telemetry.events.pricing_key strips Anthropic's
-# date suffix before lookup.
+# date suffix before lookup. Every model priced in pricing.yaml must appear
+# here; tests/test_windows.py fails if the two tables drift apart.
 #
 # These are the *input* windows. Output caps are separate and much smaller; the
-# agent's per-call output cap lives in Limits.max_tokens_per_call.
+# agent's per-call output cap lives in Limits.max_tokens_per_call. For
+# reference, the output caps are 65,536 on the Gemini 3.x Flash models,
+# 128,000 on Claude Sonnet 5 and Opus 5, and 64,000 on Claude Haiku 4.5.
+#
+# A caveat the numbers cannot express: an alias is a pointer. If a vendor
+# repoints one at a model with a different window, the budget derived here is
+# silently wrong. Prefer pinned ids where a vendor offers them.
 
 gemini:
-  # TODO: unverified. Captured in tests/fixtures/toolcalls/gemini_weather_*.json.
-  gemini-3.6-flash: null
-
-  gemini-2.0-flash: 1048576
-  gemini-2.5-flash: 1048576
-  gemini-2.5-pro: 1048576
+  gemini-3.7-flash: 1048576
+  gemini-3.6-flash: 1048576
 
 openai:
-  # TODO: unverified. Captured in tests/fixtures/toolcalls/openai_weather_*.json.
+  # TODO: unverified. The pricing page carries no token limits and the model
+  # catalog was not checked; null keeps compaction off rather than guessing
+  # from the short/long context split in the rate card.
   gpt-5.6-luna: null
 
 anthropic:
   claude-haiku-4-5: 200000
-
-  # TODO: unverified.
-  claude-opus-5: null
-  claude-sonnet-5: null
+  claude-sonnet-5: 1000000
+  claude-opus-5: 1000000

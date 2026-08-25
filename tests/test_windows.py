@@ -17,7 +17,7 @@ def _clear_table_cache() -> None:
 
 
 def test_known_window_is_found() -> None:
-    assert windows.context_window("gemini", "gemini-2.0-flash") == 1_048_576
+    assert windows.context_window("gemini", "gemini-3.7-flash") == 1_048_576
     assert windows.context_window("anthropic", "claude-haiku-4-5") == 200_000
 
 
@@ -27,7 +27,7 @@ def test_dated_anthropic_id_resolves() -> None:
 
 
 def test_family_is_case_insensitive() -> None:
-    assert windows.context_window("GEMINI", "gemini-2.0-flash") == 1_048_576
+    assert windows.context_window("GEMINI", "gemini-3.7-flash") == 1_048_576
 
 
 def test_null_and_unknown_are_both_none() -> None:
@@ -37,7 +37,7 @@ def test_null_and_unknown_are_both_none() -> None:
 
 
 def test_policy_is_the_configured_fraction_of_the_window() -> None:
-    policy = windows.policy_for("gemini:gemini-2.0-flash")
+    policy = windows.policy_for("gemini:gemini-3.7-flash")
 
     assert policy is not None
     assert policy.max_input_tokens == int(1_048_576 * 0.6)
@@ -53,7 +53,7 @@ def test_policy_ratio_is_overridable() -> None:
 
 
 def test_policy_accepts_a_bare_model_with_a_default_family() -> None:
-    policy = windows.policy_for("gemini-2.0-flash", default_family="gemini")
+    policy = windows.policy_for("gemini-3.7-flash", default_family="gemini")
 
     assert policy is not None
     assert policy.max_input_tokens == int(1_048_576 * 0.6)
@@ -68,7 +68,7 @@ def test_unknown_window_yields_no_policy() -> None:
 @pytest.mark.parametrize("ratio", [0.0, -0.1, 1.5])
 def test_impossible_ratios_are_refused(ratio: float) -> None:
     with pytest.raises(ValueError, match="ratio must be"):
-        windows.policy_for("gemini:gemini-2.0-flash", ratio=ratio)
+        windows.policy_for("gemini:gemini-3.7-flash", ratio=ratio)
 
 
 def test_malformed_spec_still_raises_from_the_parser() -> None:
@@ -84,8 +84,8 @@ def test_missing_table_file_is_not_a_crash(
     monkeypatch.setattr(config, "CONTEXT_WINDOW_FILE", tmp_path / "absent.yaml")
     windows._window_table.cache_clear()
 
-    assert windows.context_window("gemini", "gemini-2.0-flash") is None
-    assert windows.policy_for("gemini:gemini-2.0-flash") is None
+    assert windows.context_window("gemini", "gemini-3.7-flash") is None
+    assert windows.policy_for("gemini:gemini-3.7-flash") is None
 
 
 def test_non_integer_entries_are_ignored(

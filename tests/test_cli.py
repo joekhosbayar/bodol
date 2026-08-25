@@ -151,7 +151,7 @@ def test_run_loads_the_prompt_and_registers_the_builtins(agent) -> None:  # type
 
 
 def test_run_derives_the_context_budget_from_the_model(agent) -> None:  # type: ignore[no-untyped-def]
-    runner.invoke(cli.app, ["run", "hello", "--provider", "gemini:gemini-2.0-flash"])
+    runner.invoke(cli.app, ["run", "hello", "--provider", "gemini:gemini-3.7-flash"])
 
     (stub,) = agent.created
     policy = stub.kwargs["context"]

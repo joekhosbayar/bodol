@@ -112,7 +112,7 @@ def main(
 def run(
     task: Annotated[str, typer.Argument(help="The task for the agent.")],
     provider: Annotated[
-        str, typer.Option("--provider", "-p", help='e.g. "gemini:gemini-2.0-flash"')
+        str, typer.Option("--provider", "-p", help='e.g. "gemini:gemini-3.7-flash"')
     ] = config.DEFAULT_PROVIDER,
     prompt_version: Annotated[
         str, typer.Option("--system", "-s", help="Prompt version to load, e.g. v2.")
