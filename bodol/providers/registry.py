@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from typing import cast
 
@@ -10,7 +11,7 @@ import httpx
 from bodol import config
 from bodol.providers import anthropic, gemini, openai
 from bodol.providers.base import Provider
-from bodol.providers.http import DEFAULT_RETRY, RetryPolicy
+from bodol.providers.http import DEFAULT_RETRY, Attempt, RetryPolicy
 from bodol.telemetry import events
 from bodol.telemetry.middleware import TracedProvider
 from bodol.telemetry.writer import JsonlSink, Sink
@@ -69,6 +70,32 @@ def _make_sink(trace_id: str) -> Sink:
     return JsonlSink.for_trace(trace_id)
 
 
+def _retry_recorder(sink: Sink, provider: str, model: str) -> Callable[[Attempt], None]:
+    """Put every failed HTTP attempt in the trace.
+
+    This is the one place that can: `TracedProvider` wraps `generate()` and only
+    ever sees the outcome, while the attempts happen a layer below it inside
+    `post_json`. The HTTP layer holds no sink, so the sink is handed to it here
+    as a callback on the retry policy.
+    """
+
+    def record(attempt: Attempt) -> None:
+        sink.emit(
+            events.retry_record(
+                provider,
+                model,
+                attempt=attempt.number,
+                of=attempt.of,
+                status=attempt.status,
+                latency_ms=attempt.latency_ms,
+                delay_s=attempt.delay_s,
+                detail=attempt.detail,
+            )
+        )
+
+    return record
+
+
 def create_provider(
     value: str,
     *,
@@ -98,6 +125,8 @@ def create_provider(
         )
 
     sink = _make_sink(trace_id)
+    if retry.on_attempt is None:
+        retry = dataclasses.replace(retry, on_attempt=_retry_recorder(sink, family, model))
     try:
         adapter = adapter_type(model, api_key=api_key, client=client, retry=retry)
     except config.MissingCredential as exc:
