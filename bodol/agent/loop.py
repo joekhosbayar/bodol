@@ -47,6 +47,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from bodol.agent import progress
 from bodol.context import CompactionError, ContextManager, ContextPolicy
 from bodol.providers import create_provider
 from bodol.providers.base import (
@@ -272,6 +273,22 @@ class Agent:
                     if manager is not None:
                         manager.observe(response)
 
+                    # Announced as the call lands, not collected for the end. The
+                    # whole point is to be readable while the run is still going.
+                    logger.info(
+                        progress.step_line(
+                            steps,
+                            response,
+                            elapsed=_monotonic() - started,
+                            budget=self.limits.max_seconds,
+                            cost_total=cost,
+                            tokens_total=usage.total_tokens,
+                        )
+                    )
+                    prose = progress.text_line(response)
+                    if prose is not None:
+                        logger.info("  %s", prose)
+
                     if not response.wants_tools:
                         if response.text is not None:
                             messages.append(
@@ -320,7 +337,16 @@ class Agent:
         fine. They are answered with an error block instead, which is the same
         shape the registry already returns for undecodable arguments — the
         model sees what it got wrong and can correct itself on the next step.
+
+        Every call is announced before it runs and every result after, in call
+        order. The arrows are not interleaved into pairs because the calls are
+        not sequential: `dispatch_all` gathers, so five greps start together and
+        finish in whatever order they finish. Printing all the asks and then all
+        the answers is what actually happened.
         """
+        for call in calls:
+            logger.info("  %s", progress.call_line(call))
+
         known = {spec.name for spec in self.tools.specs}
         dispatchable = [call for call in calls if call.name in known]
         results: dict[str, ContentBlock] = {
@@ -335,7 +361,11 @@ class Agent:
                     content=f"Unknown tool {call.name!r}. Available tools: {available}",
                     is_error=True,
                 )
-        return tuple(results[call.id] for call in calls)
+        ordered = tuple(results[call.id] for call in calls)
+        for block in ordered:
+            if isinstance(block, ToolResultBlock):
+                logger.info("  %s", progress.result_line(block))
+        return ordered
 
 
 __all__ = ["DEFAULT_LIMITS", "Agent", "Limits", "RunResult", "StopReason"]

@@ -355,8 +355,11 @@ async def test_unpriced_model_cannot_trip_max_cost(
 async def test_max_seconds_stops_the_loop(
     install: InstallProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # start, three limit checks, then the reading `result` takes on the way out.
-    ticks = iter((0.0, 0.0, 5.0, 11.0, 11.0))
+    # Every clock read, in order: the start, then per iteration a limit check and
+    # (when a call completed) the progress header, then `result` on the way out.
+    # The header's reading has to come after the call rather than share the limit
+    # check's, or a step's elapsed time would omit that step's own latency.
+    ticks = iter((0.0, 0.0, 1.0, 5.0, 6.0, 11.0, 11.0))
     monkeypatch.setattr(loop_module, "_monotonic", lambda: next(ticks, 999.0))
     install(FakeProvider(repeat=_response(tool_calls=(_tool_call(),))))
     agent = Agent(
@@ -369,6 +372,47 @@ async def test_max_seconds_stops_the_loop(
 
     assert result.stop_reason is StopReason.MAX_SECONDS
     assert result.steps == 2
+
+
+async def test_each_step_is_announced_as_it_lands(
+    install: InstallProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A run that prints nothing until it finishes is indistinguishable from a
+    hung one. The tool arrows come before the results because dispatch gathers:
+    five calls start together, so five asks and then five answers is what
+    actually happened."""
+    install(
+        FakeProvider(
+            [
+                _response(text="Let me check.", tool_calls=(_tool_call(),)),
+                _response(text="sunny"),
+            ]
+        )
+    )
+    agent = Agent("fake:fake-model", tools=_weather_registry())
+
+    with caplog.at_level("INFO", logger="bodol.agent.loop"):
+        await agent.run("weather in Boston?")
+
+    lines = [record.getMessage() for record in caplog.records]
+    assert lines[0].startswith("step 1 · ")
+    assert lines[1] == '  "Let me check."'
+    assert lines[2] == "  → get_weather(city='Boston')"
+    assert lines[3] == "  ← get_weather · ok · 15 B"
+    assert lines[4].startswith("step 2 · ")
+
+
+async def test_progress_is_info_so_trouble_can_still_be_filtered_out(
+    install: InstallProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Someone who only wants to hear about problems sets WARNING and should then
+    get the retry notices and budget overruns, not a play-by-play."""
+    install(FakeProvider([_response(text="done")]))
+
+    with caplog.at_level("WARNING", logger="bodol.agent.loop"):
+        await Agent("fake:fake-model").run("hello")
+
+    assert caplog.records == []
 
 
 async def test_the_overshoot_past_max_seconds_is_named(

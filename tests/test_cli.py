@@ -19,7 +19,7 @@ from bodol import cli, config
 from bodol.agent import Limits, RunResult, StopReason
 from bodol.context import ContextPolicy
 from bodol.providers import ProviderCredentialError
-from bodol.providers.base import Message, TextBlock, Usage
+from bodol.providers.base import Message, TextBlock, ToolResultBlock, ToolUseBlock, Usage
 
 runner = CliRunner()
 
@@ -32,7 +32,10 @@ def _result(
     cost_usd: float = 0.0042,
     unpriced_calls: int = 0,
     error: str | None = None,
+    messages: tuple[Message, ...] | None = None,
 ) -> RunResult:
+    if messages is None:
+        messages = (Message(role="user", content=(TextBlock(text="task"),)),)
     return RunResult(
         text=text,
         stop_reason=stop_reason,
@@ -41,7 +44,7 @@ def _result(
         unpriced_calls=unpriced_calls,
         usage=Usage(input_tokens=1000, output_tokens=234),
         trace_id="tr_abc123",
-        messages=(Message(role="user", content=(TextBlock(text="task"),)),),
+        messages=messages,
         error=error,
     )
 
@@ -59,10 +62,14 @@ class StubAgent:
         self.raises: Exception | None = None
         # Stands in for the HTTP layer announcing a retry mid-run.
         self.warns: str | None = None
+        # Stands in for the loop announcing a completed step mid-run.
+        self.notes: str | None = None
         StubAgent.last = self
 
     async def run(self, task: str) -> RunResult:
         self.tasks.append(task)
+        if self.notes is not None:
+            logging.getLogger("bodol.agent.loop").info(self.notes)
         if self.warns is not None:
             logging.getLogger("bodol.providers.http").warning(self.warns)
         if self.raises is not None:
@@ -82,10 +89,11 @@ def agent(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
         if shape["raises"] is not None:
             stub.raises = shape["raises"]
         stub.warns = shape["warns"]
+        stub.notes = shape["notes"]
         created.append(stub)
         return stub
 
-    shape: dict[str, Any] = {"result": None, "raises": None, "warns": None}
+    shape: dict[str, Any] = {"result": None, "raises": None, "warns": None, "notes": None}
     monkeypatch.setattr(cli, "Agent", factory)
     return type("Hook", (), {"shape": shape, "created": created})()
 
@@ -198,6 +206,71 @@ def test_a_retry_is_visible_while_the_run_is_still_going(agent) -> None:  # type
     result = runner.invoke(cli.app, ["run", "hello"])
 
     assert "  retry 1/4 · HTTP 500 · waiting 2.0s · high demand" in result.stderr
+
+
+def test_step_progress_reaches_the_terminal_while_the_run_is_going(agent) -> None:  # type: ignore[no-untyped-def]
+    """Progress is INFO, not WARNING: it is not trouble. The CLI still shows it,
+    because the question "is this thing still working" is the same question."""
+    agent.shape["notes"] = "step 1 · 6.2s · 51s/120s · $0.0186 · 23,110 tokens"
+
+    result = runner.invoke(cli.app, ["run", "hello"])
+
+    assert "  step 1 · 6.2s · 51s/120s · $0.0186 · 23,110 tokens" in result.stderr
+
+
+def _stuck_transcript() -> tuple[Message, ...]:
+    """Eight steps of grepping, no answer — the shape of a real cut-short run."""
+    return (
+        Message(role="user", content=(TextBlock(text="how many python files?"),)),
+        Message(
+            role="assistant",
+            content=(
+                TextBlock(text="I still need the sizes."),
+                ToolUseBlock(id="c1", name="grep", args={}),
+                ToolUseBlock(id="c2", name="grep", args={}),
+                ToolUseBlock(id="c3", name="file_read", args={}),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(call_id="c1", name="grep", content="hits"),),
+        ),
+    )
+
+
+def test_a_run_with_no_answer_still_shows_what_it_did(agent) -> None:  # type: ignore[no-untyped-def]
+    """$0.056 of tool work used to print the words "(no text)" and nothing else.
+
+    The transcript was in the RunResult the whole time.
+    """
+    agent.shape["result"] = _result(
+        text=None, stop_reason=StopReason.MAX_SECONDS, messages=_stuck_transcript()
+    )
+
+    result = runner.invoke(cli.app, ["run", "hello"])
+
+    assert "  did · grep ×2, file_read" in result.stderr
+    assert '  last words · "I still need the sizes."' in result.stderr
+    assert result.stdout.strip() == "", "a partial thought is not an answer and stdout is answers"
+
+
+def test_salvage_lines_are_skipped_when_there_is_nothing_to_salvage(agent) -> None:  # type: ignore[no-untyped-def]
+    agent.shape["result"] = _result(text=None)
+
+    result = runner.invoke(cli.app, ["run", "hello"])
+
+    assert "(no text)" in result.stderr
+    assert "did ·" not in result.stderr
+    assert "last words" not in result.stderr
+
+
+def test_an_answered_run_says_nothing_about_the_route_it_took(agent) -> None:  # type: ignore[no-untyped-def]
+    agent.shape["result"] = _result(text="42 files", messages=_stuck_transcript())
+
+    result = runner.invoke(cli.app, ["run", "hello"])
+
+    assert result.stdout.strip() == "42 files"
+    assert "did ·" not in result.stderr, "the trail is a consolation, not a habit"
 
 
 def test_the_log_handler_does_not_outlive_the_run(agent) -> None:  # type: ignore[no-untyped-def]

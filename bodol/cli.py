@@ -28,7 +28,7 @@ from typing import Annotated, Any, NoReturn
 import typer
 
 from bodol import __version__, config
-from bodol.agent import Agent, Limits, RunResult, StopReason, prompts
+from bodol.agent import Agent, Limits, RunResult, StopReason, progress, prompts
 from bodol.context import policy_for
 from bodol.providers import ProviderRegistryError
 from bodol.tools.builtins import register_builtins
@@ -81,7 +81,17 @@ def _report(result: RunResult) -> None:
     if result.text:
         typer.echo(result.text)
     else:
+        # A run with no answer is not a run with nothing in it. Eight steps of
+        # tool work and a partial thought are worth showing — on stderr, and
+        # labelled, because a sentence written on the way to somewhere else is
+        # not an answer and must not land in a redirected stdout as if it were.
         typer.secho("(no text)", fg=typer.colors.BRIGHT_BLACK, err=True)
+        did = progress.trail(result.messages)
+        if did:
+            typer.secho(f"  did · {did}", fg=typer.colors.BRIGHT_BLACK, err=True)
+        words = progress.last_words(result.messages)
+        if words:
+            typer.secho(f'  last words · "{words}"', fg=typer.colors.BRIGHT_BLACK, err=True)
 
     parts = [
         f"{result.steps} step{'s' if result.steps != 1 else ''}",
@@ -103,12 +113,17 @@ def _report(result: RunResult) -> None:
 
 
 @contextlib.contextmanager
-def _live_warnings() -> Iterator[None]:
-    """Show the library's warnings on stderr while the run is in progress.
+def _live_notices() -> Iterator[None]:
+    """Show the library's progress and warnings on stderr while the run is going.
 
-    The HTTP layer cannot print: a library that owns stdio is a library you
-    cannot embed. So it logs, and this — the one place that does own the
-    terminal — decides that a retry is worth watching and what it looks like.
+    The layers below cannot print: a library that owns stdio is a library you
+    cannot embed. So they log, and this — the one place that does own the
+    terminal — decides what is worth watching and what it looks like.
+
+    INFO carries progress, WARNING carries trouble, and both are shown, because
+    both answer the same question: is this thing still working? A consumer that
+    only wants the trouble filters to WARNING and gets exactly the retry notices
+    and the budget overruns.
 
     Scoped to the run rather than installed once at startup, because a
     `StreamHandler` captures the stream it was built with. A handler that
@@ -120,7 +135,7 @@ def _live_warnings() -> Iterator[None]:
     library = logging.getLogger("bodol")
     level, propagate = library.level, library.propagate
     library.addHandler(handler)
-    library.setLevel(logging.WARNING)
+    library.setLevel(logging.INFO)
     # Ours is the only handler that should print these; an embedding app's root
     # configuration would otherwise show each line twice.
     library.propagate = False
@@ -189,7 +204,7 @@ def run(
         context=policy,
     )
     try:
-        with _live_warnings():
+        with _live_notices():
             result = asyncio.run(agent.run(task))
     except ProviderRegistryError as exc:
         _die(str(exc))
