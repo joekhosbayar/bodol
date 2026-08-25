@@ -11,12 +11,13 @@ load_dotenv()
 
 ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_PROVIDER = os.getenv("BODOL_PROVIDER", "gemini:gemini-2.0-flash")
+DEFAULT_PROVIDER = os.getenv("BODOL_PROVIDER", "gemini:gemini-3.7-flash")
 
 TRACE_DIR = Path(os.getenv("BODOL_TRACE_DIR", ROOT / "traces"))
 SCRATCHPAD_DIR = Path(os.getenv("BODOL_SCRATCHPAD_DIR", ROOT / "scratchpad"))
 PROMPT_DIR = Path(os.getenv("BODOL_PROMPT_DIR", ROOT / "prompts"))
 PRICING_FILE = Path(__file__).parent / "data" / "pricing.yaml"
+CONTEXT_WINDOW_FILE = Path(__file__).parent / "data" / "context_windows.yaml"
 
 
 class MissingCredential(RuntimeError):

@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,32 @@ from bodol.telemetry.writer import JsonlSink, MemorySink, NullSink, Sink, read_t
 from tests.conftest import load
 
 HAIKU = Usage(input_tokens=591, output_tokens=59)
+
+
+@pytest.fixture
+def unpriced_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A pricing table whose entries are explicitly null.
+
+    The null-rate path used to be tested against whichever shipped model
+    happened to be unpriced, which broke the moment that model got a price.
+    The behaviour under test belongs to the loader and cost_usd, not to the
+    rate card, so the rate card here is a fixture.
+    """
+    from bodol import config
+
+    table = tmp_path / "pricing.yaml"
+    table.write_text(
+        "gemini:\n"
+        "  gemini-3.6-flash:\n"
+        "    input: null\n"
+        "    output: null\n"
+        "    cached_input: null\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "PRICING_FILE", table)
+    events._pricing_table.cache_clear()
+    yield
+    events._pricing_table.cache_clear()
 
 
 # ---------------------------------------------------------------- ambient context
@@ -83,10 +109,53 @@ def test_cached_tokens_are_priced_at_the_cache_rate() -> None:
     assert events.cost_usd(usage, rates) == pytest.approx((200 * 1.00 + 800 * 0.10) / 1e6)
 
 
-def test_unpriced_models_cost_none_not_zero() -> None:
+def test_unpriced_models_cost_none_not_zero(unpriced_table: None) -> None:
     rates = events.rates_for("gemini", "gemini-3.6-flash")
     assert not rates.priceable
     assert events.cost_usd(HAIKU, rates) is None
+
+
+def test_every_shipped_model_is_priced() -> None:
+    """A null rate is a placeholder. Shipping one silently reports null costs."""
+    import yaml
+
+    from bodol import config
+
+    raw = yaml.safe_load(config.PRICING_FILE.read_text())
+    unpriced = [
+        f"{family}:{model}"
+        for family, models in raw.items()
+        for model, rates in (models or {}).items()
+        if (rates or {}).get("input") is None or (rates or {}).get("output") is None
+    ]
+    assert unpriced == [], f"models shipped without rates: {unpriced}"
+
+
+def test_cache_write_rates_are_present_for_every_model() -> None:
+    """Forward compatibility: the keys a future cost_usd needs must already be
+    filled in or explicitly null, never absent, so nobody has to guess whether a
+    missing key meant "no premium" or "nobody looked"."""
+    import yaml
+
+    from bodol import config
+
+    raw = yaml.safe_load(config.PRICING_FILE.read_text())
+    required = {"cached_input", "cache_write", "cache_write_1h", "cache_storage_per_hour"}
+    missing = {
+        f"{family}:{model}": sorted(required - set(rates or {}))
+        for family, models in raw.items()
+        for model, rates in (models or {}).items()
+        if required - set(rates or {})
+    }
+    assert missing == {}, f"cache keys absent: {missing}"
+
+
+def test_todays_loader_ignores_the_cache_write_keys() -> None:
+    """The write rates are inert until Rates grows fields for them. Proving that
+    keeps the data safe to ship ahead of the code."""
+    rates = events.rates_for("anthropic", "claude-haiku-4-5")
+    assert (rates.input, rates.output, rates.cached_input) == (1.00, 5.00, 0.10)
+    assert not hasattr(rates, "cache_write"), "add a four-bucket cost_usd before this field"
 
 
 def test_unknown_models_cost_none() -> None:
@@ -131,7 +200,7 @@ def test_record_carries_the_rates_it_was_priced_at() -> None:
     assert rec["rates_usd_per_mtok"] == {"input": 1.00, "output": 5.00, "cached_input": 0.10}
 
 
-def test_unpriced_call_records_null_cost_and_null_rates() -> None:
+def test_unpriced_call_records_null_cost_and_null_rates(unpriced_table: None) -> None:
     from bodol.providers import gemini
 
     rec = events.call_record(gemini.normalize(load("toolcalls/gemini_weather_0")))
