@@ -10,6 +10,7 @@ from bodol.providers.base import (
     Message,
     Provider,
     TextBlock,
+    ThoughtBlock,
     ToolResultBlock,
     ToolSpec,
     ToolUseBlock,
@@ -83,6 +84,27 @@ def test_unknown_status_does_not_read_as_done() -> None:
     assert r.finish_reason is FinishReason.UNKNOWN
 
 
+def test_thought_signature_is_captured_for_replay() -> None:
+    """Half of the fix for the first live 400.
+
+    The signature is the model's own proof that its thought and its
+    function_call belong together, and Gemini rejects turn 2 when the pair is
+    replayed without it. Leaving it buried in `raw` is what broke the first
+    tool-using run, so normalize() has to surface it as conversation state.
+    """
+    raw = load("toolcalls/gemini_weather_0")
+    signed = [s["signature"] for s in raw["steps"] if s.get("type") == "thought"]
+    assert signed, "fixture proves nothing about signatures without a thought step"
+
+    assert gemini.normalize(raw).thoughts == tuple(ThoughtBlock(s) for s in signed)
+
+
+def test_unsigned_thought_is_not_replayed() -> None:
+    """An empty signature is not replayable, and sending one back is a 400."""
+    r = gemini.normalize({"status": "completed", "steps": [{"type": "thought"}]})
+    assert r.thoughts == ()
+
+
 def test_raw_is_preserved() -> None:
     raw = load("toolcalls/gemini_weather_0")
     assert gemini.normalize(raw).raw is raw
@@ -97,25 +119,72 @@ def test_responses_compare_by_value() -> None:
 
 
 def test_renders_a_full_round_trip_as_steps() -> None:
+    """Turn 2 of a tool call, in the exact shape Gemini accepts.
+
+    Both rules are asserted here because breaking either one fails the request
+    whole, with a bare `400 Invalid input received.` and no field named: the
+    signed thought must precede its function_call, and the function_result must
+    carry the tool's name next to the call id.
+    """
     steps = gemini._render_messages(
         [
             Message("user", (TextBlock("weather in Ulaanbaatar?"),)),
             Message(
                 "assistant",
-                (ToolUseBlock("vLClgAAM", "get_weather", {"city": "Ulaanbaatar"}),),
+                (
+                    ThoughtBlock("EjQKMgERTTIPVtJXOu"),
+                    ToolUseBlock("vLClgAAM", "get_weather", {"city": "Ulaanbaatar"}),
+                ),
             ),
-            Message("user", (ToolResultBlock("vLClgAAM", '{"temperature_c": 12}'),)),
+            Message(
+                "user",
+                (ToolResultBlock("vLClgAAM", "get_weather", '{"temperature_c": 12}'),),
+            ),
         ]
     )
 
-    assert [s["type"] for s in steps] == ["user_input", "function_call", "function_result"]
-    assert steps[1]["arguments"] == {"city": "Ulaanbaatar"}
+    assert [s["type"] for s in steps] == [
+        "user_input",
+        "thought",
+        "function_call",
+        "function_result",
+    ]
+    assert steps[1] == {"type": "thought", "signature": "EjQKMgERTTIPVtJXOu"}
+    assert steps[2]["arguments"] == {"city": "Ulaanbaatar"}
+    assert steps[3]["call_id"] == "vLClgAAM"
+    assert steps[3]["name"] == "get_weather"
     # JSON-shaped tool output is sent as an object, matching the captured request.
-    assert steps[2]["result"] == {"temperature_c": 12}
+    assert steps[3]["result"] == {"temperature_c": 12}
+
+
+def test_normalized_thought_survives_a_round_trip() -> None:
+    """What a live run actually does: normalize a response, replay its turn.
+
+    Asserting against the fixture's own signature is what makes this a
+    regression test — the captured response and the next request have to agree.
+    """
+    response = gemini.normalize(load("toolcalls/gemini_weather_0"))
+    (call,) = response.tool_calls
+    steps = gemini._render_messages(
+        [
+            Message("user", (TextBlock("weather in Ulaanbaatar?"),)),
+            Message(
+                "assistant",
+                (*response.thoughts, ToolUseBlock(call.id, call.name, call.args or {})),
+            ),
+            Message("user", (ToolResultBlock(call.id, call.name, "12C, clear"),)),
+        ]
+    )
+
+    thought, function_call = steps[1], steps[2]
+    assert thought["signature"] == load("toolcalls/gemini_weather_0")["steps"][0]["signature"]
+    assert function_call["id"] == call.id
 
 
 def test_non_json_tool_result_falls_back_to_string() -> None:
-    steps = gemini._render_messages([Message("user", (ToolResultBlock("c1", "12C, clear"),))])
+    steps = gemini._render_messages(
+        [Message("user", (ToolResultBlock("c1", "get_weather", "12C, clear"),))]
+    )
     assert steps[0]["result"] == "12C, clear"
 
 

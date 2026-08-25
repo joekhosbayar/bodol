@@ -32,6 +32,7 @@ from bodol.providers.base import (
     Message,
     ModelResponse,
     TextBlock,
+    ThoughtBlock,
     ToolCall,
     ToolResultBlock,
     ToolSpec,
@@ -177,6 +178,12 @@ def _render_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
                             "output": block.content,
                         }
                     )
+                case ThoughtBlock():
+                    # Dropped: nothing here produces one. normalize() does not
+                    # capture OpenAI's `reasoning` items, and echoing them would
+                    # mean replaying an item id plus its encrypted content, not
+                    # a signature — a different shape than this block carries.
+                    continue
     return items
 
 

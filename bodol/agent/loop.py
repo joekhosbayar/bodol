@@ -141,10 +141,15 @@ def _merge_usage(total: Usage, add: Usage) -> Usage:
 def _assistant_turn(response: ModelResponse) -> Message:
     """Replay the model's tool-calling turn back into history.
 
+    Signed reasoning is echoed first, ahead of prose and tool calls. Gemini
+    validates a replayed `function_call` against the `thought` step that
+    preceded it and rejects the whole request when that step is missing, so the
+    original order has to survive the round trip.
+
     A call whose arguments never decoded still has to be echoed before its
     error result, with `{}` as args and the original string as `raw_args`.
     """
-    blocks: list[ContentBlock] = []
+    blocks: list[ContentBlock] = list(response.thoughts)
     if response.text:
         blocks.append(TextBlock(text=response.text))
     blocks.extend(
@@ -299,6 +304,7 @@ class Agent:
             if call.name not in known:
                 results[call.id] = ToolResultBlock(
                     call_id=call.id,
+                    name=call.name,
                     content=f"Unknown tool {call.name!r}. Available tools: {available}",
                     is_error=True,
                 )

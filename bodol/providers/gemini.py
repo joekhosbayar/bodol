@@ -25,6 +25,7 @@ from bodol.providers.base import (
     Message,
     ModelResponse,
     TextBlock,
+    ThoughtBlock,
     ToolCall,
     ToolResultBlock,
     ToolSpec,
@@ -84,6 +85,7 @@ def normalize(raw: dict[str, Any], *, latency_ms: float = 0.0) -> ModelResponse:
     """Pure: a decoded response body in, a ModelResponse out. No HTTP here."""
     texts: list[str] = []
     tool_calls: list[ToolCall] = []
+    thoughts: list[ThoughtBlock] = []
 
     for step in raw.get("steps") or []:
         match step.get("type"):
@@ -100,8 +102,14 @@ def normalize(raw: dict[str, Any], *, latency_ms: float = 0.0) -> ModelResponse:
                         args=step.get("arguments") or {},
                     )
                 )
-            # "thought" steps carry a signature and nothing else to normalize.
-            # That signature is conversation state, and it survives in `raw`.
+            case "thought":
+                # A signature and nothing else — no text to show a user. It is
+                # captured because the next request has to send it back: Gemini
+                # rejects a replayed function_call whose thought step is
+                # missing. A thought with no signature is not replayable, so it
+                # is dropped rather than echoed as an empty one.
+                if signature := step.get("signature"):
+                    thoughts.append(ThoughtBlock(signature=signature))
 
     return ModelResponse(
         id=raw.get("id", ""),
@@ -114,6 +122,7 @@ def normalize(raw: dict[str, Any], *, latency_ms: float = 0.0) -> ModelResponse:
         # that returned an empty one.
         text="".join(texts) if texts else None,
         tool_calls=tuple(tool_calls),
+        thoughts=tuple(thoughts),
         raw=raw,
     )
 
@@ -147,6 +156,19 @@ def _render_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
 
 
 def _render_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
+    """Flatten the transcript into Gemini's flat `input` step list.
+
+    Two rules govern a turn that replays a tool call, both of which Gemini
+    enforces with a bare `400 Invalid input received.`:
+
+        1. The `thought` step the model emitted before its `function_call` has
+           to be sent back, in front of it. The signature is how the backend
+           ties the pair together.
+        2. Every `function_result` carries `name` as well as `call_id`.
+
+    Break either one and the request fails whole — there is no partial accept
+    and no field-level detail in the response.
+    """
     steps: list[dict[str, Any]] = []
     for msg in messages:
         if msg.role == "system":
@@ -174,10 +196,13 @@ def _render_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
                         {
                             "type": "function_result",
                             "call_id": block.call_id,
+                            "name": block.name,
                             "result": _result_payload(block.content),
                             "is_error": block.is_error,
                         }
                     )
+                case ThoughtBlock():
+                    steps.append({"type": "thought", "signature": block.signature})
     return steps
 
 

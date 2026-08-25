@@ -29,6 +29,7 @@ from bodol.providers.base import (
     ModelResponse,
     Provider,
     TextBlock,
+    ThoughtBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -75,6 +76,12 @@ def _render_turn(message: Message) -> str:
             case ToolResultBlock(content=content, is_error=is_error):
                 tag = "tool_error" if is_error else "tool_result"
                 parts.append(f"[{tag} {content}]")
+            case ThoughtBlock():
+                # Nothing to summarize: the block holds a signature, no text.
+                # It is also dropped from the compacted transcript, which is
+                # correct — a signature outlives neither the turn it signs nor
+                # the tool call it was paired with.
+                continue
     return f"{message.role}: " + "\n".join(parts)
 
 

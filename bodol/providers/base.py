@@ -150,6 +150,10 @@ class ModelResponse:
     # tool-call turn, and distinct from the model returning empty prose.
     text: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    # Signed reasoning that has to be replayed alongside `tool_calls` on the
+    # next request. Empty for vendors that sign nothing, so the runtime can
+    # always echo it unconditionally.
+    thoughts: tuple[ThoughtBlock, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -185,14 +189,38 @@ class ToolUseBlock:
 
 @dataclass(frozen=True, slots=True)
 class ToolResultBlock:
-    """The runtime's answer to a ToolUseBlock. `call_id` must match its `id`."""
+    """The runtime's answer to a ToolUseBlock. `call_id` must match its `id`.
+
+    `name` is the tool's registered name. Gemini's `function_result` step
+    requires it *alongside* `call_id` and rejects the turn without it, so the
+    name rides on the block even though OpenAI and Anthropic match results to
+    calls by id alone.
+    """
 
     call_id: str
+    name: str
     content: str
     is_error: bool = False
 
 
-ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
+@dataclass(frozen=True, slots=True)
+class ThoughtBlock:
+    """An opaque, provider-signed reasoning step, replayed verbatim.
+
+    Gemini answers 400 when a `function_call` is sent back without the
+    `thought` step the model emitted with it: the signature is how the backend
+    validates that the pair belongs together. The block is deliberately
+    contentless — the signature is conversation state, not something to read,
+    summarize, or edit. Adapters with nothing to echo drop it.
+
+    Anthropic's `thinking` blocks are NOT representable here: they carry the
+    thinking text next to their signature. See the gap noted in anthropic.py.
+    """
+
+    signature: str
+
+
+ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ThoughtBlock
 
 
 @dataclass(frozen=True, slots=True)
