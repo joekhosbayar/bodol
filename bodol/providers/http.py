@@ -18,13 +18,21 @@ import random
 import re
 import textwrap
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
+
+# One clock for every deadline here. `perf_counter` measures short intervals
+# better, but a deadline set by the agent loop has to be comparable to a reading
+# taken inside this module, and two different monotonic clocks in one comparison
+# is a bug waiting for a slow afternoon.
+_clock = time.monotonic
 
 # A library does not own stdio. This layer reports a retry and leaves the
 # decision about whether a human should see it to whoever configured logging —
@@ -58,6 +66,98 @@ class TransientError(ProviderHTTPError):
 
 class PermanentError(ProviderHTTPError):
     """Not worth retrying — bad request, bad auth, model not found."""
+
+
+class QuotaError(ProviderHTTPError):
+    """The allowance is gone, and asking again spends more of it.
+
+    Deliberately NOT a `TransientError`, which is the whole point of a separate
+    type: the agent loop retries transient failures, and retrying this one is
+    how a 90-second wait becomes a three-minute one. A 429 is temporary in the
+    sense that it clears eventually; it is not temporary in the sense that
+    waiting-and-asking makes it clear sooner. Those are different things and the
+    old code could not tell them apart.
+
+    Raised only once the provider's own requested delay has *grown* — see
+    `_delay_grew`. A single 429 still earns one retry, because a per-minute rate
+    limit really does clear on its own.
+    """
+
+
+# The run's deadline, on `_clock`, or None when nothing is bounding the run.
+#
+# Ambient rather than a parameter, for the reason `telemetry/events.py` sets out
+# for `trace_id` and `step`: the alternative is threading a deadline through
+# `Provider.generate`, three adapters and `TracedProvider`, none of which have
+# any other business knowing what time it is. ContextVars are copied into tasks
+# spawned by `asyncio.gather`, so parallel calls inside one run share it.
+_run_deadline: ContextVar[float | None] = ContextVar("bodol_run_deadline", default=None)
+
+# The delay a provider last asked for, in its own words, anywhere in this run.
+#
+# Run-scoped rather than call-scoped because the escalation that identifies a
+# spent quota now spans calls: the agent loop retries a failed step, so a
+# sequence that used to be four attempts inside one call can be one attempt in
+# each of four calls. Kept per-run so one run cannot poison the next.
+_last_asked: ContextVar[float | None] = ContextVar("bodol_last_asked", default=None)
+
+
+@contextmanager
+def run_budget(seconds: float | None) -> Iterator[None]:
+    """Bound every call made inside this block by the run's own time budget.
+
+    Without it, `max_total_seconds` is the only ceiling a call knows about, and a
+    run asked to stop after 10 seconds keeps a call alive for 90 — the run's
+    limit is checked between calls, so it cannot reach inside one.
+
+    Restores the previous values on exit, so sequential runs in one process do
+    not inherit each other's deadlines or each other's quota history.
+    """
+    deadline = _run_deadline.set(None if seconds is None else _clock() + seconds)
+    asked = _last_asked.set(None)
+    try:
+        yield
+    finally:
+        _last_asked.reset(asked)
+        _run_deadline.reset(deadline)
+
+
+@dataclass(frozen=True, slots=True)
+class Budget:
+    """The deadline a call must respect, and which limit imposed it.
+
+    The source is carried because an operator reading "the deadline expired"
+    immediately needs to know whose deadline: theirs, from `--max-seconds`, or
+    the library's own per-call ceiling. Those have different fixes.
+    """
+
+    deadline: float | None
+    source: str
+
+    def remaining(self) -> float | None:
+        return None if self.deadline is None else max(self.deadline - _clock(), 0.0)
+
+
+def _budget(policy: RetryPolicy, started: float) -> Budget:
+    """Whichever of the two clocks runs out first.
+
+    `min`, not either alone. The run's budget must be able to cut a call short,
+    and the call's ceiling must still stop one call from eating a long run — a
+    600-second run does not license a single 600-second retry sequence.
+    """
+    call = None if policy.max_total_seconds is None else started + policy.max_total_seconds
+    run = _run_deadline.get()
+    call_source = (
+        "call budget"
+        if policy.max_total_seconds is None
+        else f"{policy.max_total_seconds:.0f}s retry budget"
+    )
+
+    if run is None:
+        return Budget(call, call_source)
+    if call is None or run < call:
+        return Budget(run, "run's remaining time")
+    return Budget(call, call_source)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +317,69 @@ def _retry_hint_seconds(detail: str, policy: RetryPolicy) -> float | None:
     return min(float(match.group(1)), policy.max_retry_after)
 
 
+# Google names the exhausted quota inside the 429 prose, after ~240 characters of
+# boilerplate. The metric is a path; only its last segment is worth reading.
+_QUOTA_METRIC = re.compile(r"Quota exceeded for metric:\s*(\S+)")
+_QUOTA_LIMIT = re.compile(r"\blimit:\s*(\d+)")
+
+# The provider's stated delay is precise to nine decimal places, so a whole
+# second of tolerance is far more than jitter needs and safely under the smallest
+# real escalation observed (16.6s to 27.3s).
+DELAY_GROWTH_TOLERANCE = 1.0
+
+
+def _quota_note(detail: str) -> str:
+    """Name the exhausted quota, when the vendor named it.
+
+    Used only to enrich a message, never to decide anything — deciding on a
+    vendor's phrasing would make this layer's behavior hostage to a copy edit.
+    """
+    metric = _QUOTA_METRIC.search(detail)
+    if metric is None:
+        return ""
+    name = metric.group(1).rstrip(",").rsplit("/", 1)[-1]
+    limit = _QUOTA_LIMIT.search(detail)
+    said_limit = f", limit {limit.group(1)}" if limit is not None else ""
+    return f" (quota {name}{said_limit})"
+
+
+def _delay_grew(asked_for: float | None, previous: float | None) -> bool:
+    """Is the provider asking for longer than it asked for last time?
+
+    That is the fingerprint of retrying an exhausted request quota: every attempt
+    spends another request from the allowance it is waiting on, so the wait gets
+    longer rather than shorter. Observed on three consecutive runs — 27.3s to
+    59.6s, 2.4s to 59.7s, 18.1s to 59.7s — while the run made no progress at all.
+
+    Both delays must be the provider's own words. Our exponential backoff grows
+    by construction, and reading our own escalation as the provider's would abort
+    every retry sequence on its second attempt.
+    """
+    if asked_for is None or previous is None:
+        return False
+    return asked_for > previous + DELAY_GROWTH_TOLERANCE
+
+
+def _timeout_note(exc: BaseException, timeout: httpx.Timeout) -> str:
+    """Describe a transport exception, including the timeout that caused it.
+
+    `httpx` timeout exceptions carry no message at all, so `repr()` renders the
+    useless and slightly insulting `ReadTimeout('')` — which is what a caller saw
+    after this layer cut off its own request at a budget-clamped 27.4 seconds.
+    """
+    if not isinstance(exc, httpx.TimeoutException):
+        return repr(exc)
+
+    kind = type(exc).__name__
+    seconds = {
+        "ConnectTimeout": timeout.connect,
+        "ReadTimeout": timeout.read,
+        "WriteTimeout": timeout.write,
+        "PoolTimeout": timeout.pool,
+    }.get(kind)
+    return kind if seconds is None else f"{kind} after {seconds:.1f}s"
+
+
 def _retry_after_seconds(response: httpx.Response, policy: RetryPolicy) -> float | None:
     """Retry-After is either a delta in seconds or an HTTP-date. Both appear in the wild."""
     raw = response.headers.get("retry-after")
@@ -277,8 +440,14 @@ async def post_json(
 ) -> HTTPResult:
     """POST JSON, retrying transient failures, and return the decoded body with timings.
 
-    Raises PermanentError for 4xx that won't improve, TransientError when retries
-    run out, the transport keeps failing, or the retry budget is spent.
+    Raises PermanentError for 4xx that won't improve, QuotaError when the provider
+    starts asking for longer waits than it asked for before, and TransientError
+    when retries run out, the transport keeps failing, or a deadline is spent.
+
+    Two deadlines apply, and the tighter one wins: this policy's
+    `max_total_seconds`, and the run's own budget if `run_budget` set one. Errors
+    name whichever it was, because "the deadline expired" is not actionable until
+    you know whose.
 
     Every failed attempt is reported twice on the way past: to `policy.on_attempt`
     for the trace, and to this module's logger for whoever is watching. A silent
@@ -289,13 +458,28 @@ async def post_json(
     response you got to read. If your spend and your traces disagree, look here
     first — the per-attempt records are what make that visible.
     """
-    started_total = time.perf_counter()
-    deadline = (
-        None if policy.max_total_seconds is None else started_total + policy.max_total_seconds
-    )
+    started_total = _clock()
+    budget = _budget(policy, started_total)
+    deadline = budget.deadline
+
+    # What the provider last told us, kept so a run that ends on a transport
+    # failure can still report the reason it was struggling. Losing this is how a
+    # quota problem got reported as `ReadTimeout('')`.
+    last_status: int | None = None
+    last_detail = ""
+    # The quota named in *any* response so far. Google names the metric in the
+    # first 429 of a sequence and then stops, so reading only the last response
+    # loses the one detail that says which allowance is gone.
+    quota_note = ""
 
     def elapsed() -> float:
-        return time.perf_counter() - started_total
+        return _clock() - started_total
+
+    def vendor_tail() -> str:
+        if last_status is None:
+            return ""
+        said = f": {last_detail}" if last_detail else ""
+        return f"; last provider response was HTTP {last_status}{said}"
 
     def report(
         attempt: int, status: int | None, latency_ms: float, delay: float | None, detail: str
@@ -328,27 +512,37 @@ async def post_json(
             )
 
     def out_of_budget(delay: float) -> bool:
-        return deadline is not None and time.perf_counter() + delay >= deadline
+        return deadline is not None and _clock() + delay >= deadline
 
     for attempt in range(1, policy.max_attempts + 1):
-        remaining = None if deadline is None else max(deadline - time.perf_counter(), 0.0)
-        started = time.perf_counter()
+        attempt_timeout = _attempt_timeout(client.timeout, budget.remaining())
+        started = _clock()
         try:
             response = await client.post(
                 url,
                 json=payload,
                 headers=dict(headers or {}),
-                timeout=_attempt_timeout(client.timeout, remaining),
+                timeout=attempt_timeout,
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            latency_ms = (time.perf_counter() - started) * 1000
+            latency_ms = (_clock() - started) * 1000
+            note = _timeout_note(exc, attempt_timeout)
             delay = _backoff(attempt, policy)
-            last = attempt == policy.max_attempts or out_of_budget(delay)
-            report(attempt, None, latency_ms, None if last else delay, repr(exc))
+            # A deadline reached while the request was in flight is not a
+            # transport failure, and calling it one sends the reader to their
+            # network. We clamped the timeout; we get to own the outcome.
+            expired = deadline is not None and _clock() >= deadline
+            last = attempt == policy.max_attempts or out_of_budget(delay) or expired
+            report(attempt, None, latency_ms, None if last else delay, note)
             if last:
+                reason = (
+                    f"the {budget.source} expired during attempt {attempt} ({note})"
+                    if expired
+                    else f"transport failure after {attempt} attempts"
+                    f" and {elapsed():.1f}s: {note}"
+                )
                 raise TransientError(
-                    f"transport failure after {attempt} attempts"
-                    f" and {elapsed():.1f}s: {exc!r}",
+                    f"{reason}{vendor_tail()}",
                     status=None,
                     body=None,
                     url=url,
@@ -356,7 +550,7 @@ async def post_json(
             await asyncio.sleep(delay)
             continue
 
-        latency_ms = (time.perf_counter() - started) * 1000
+        latency_ms = (_clock() - started) * 1000
 
         if response.status_code < 400:
             return HTTPResult(
@@ -364,7 +558,7 @@ async def post_json(
                 body=_parse_body(response),
                 headers=dict(response.headers),
                 latency_ms=latency_ms,
-                total_ms=(time.perf_counter() - started_total) * 1000,
+                total_ms=(_clock() - started_total) * 1000,
                 attempts=attempt,
             )
 
@@ -373,6 +567,8 @@ async def post_json(
         # reaches a user through the CLI's one-line error.
         detail = _detail(body)
         said = f": {detail}" if detail else ""
+        last_status, last_detail = response.status_code, detail
+        quota_note = _quota_note(detail) or quota_note
 
         if response.status_code not in policy.retry_on:
             report(attempt, response.status_code, latency_ms, None, detail)
@@ -388,6 +584,26 @@ async def post_json(
         if asked_for is None:
             asked_for = _retry_hint_seconds(detail, policy)
         delay = asked_for if asked_for is not None else _backoff(attempt, policy)
+
+        previous_asked = _last_asked.get()
+        if _delay_grew(asked_for, previous_asked):
+            # Waiting is not what fixes this. The allowance is spent, and every
+            # attempt spends more of it, which is precisely why the number the
+            # provider is asking for went up instead of down.
+            assert asked_for is not None and previous_asked is not None  # _delay_grew
+            report(attempt, response.status_code, latency_ms, None, detail)
+            raise QuotaError(
+                f"HTTP {response.status_code} from {url}: out of allowance rather"
+                f" than busy{quota_note}. The wait asked for grew from"
+                f" {previous_asked:.1f}s to {asked_for:.1f}s over this run, which"
+                f" is what retrying an exhausted quota looks like: each attempt"
+                f" spends another request from it{said}",
+                status=response.status_code,
+                body=body,
+                url=url,
+            )
+        if asked_for is not None:
+            _last_asked.set(asked_for)
 
         if attempt == policy.max_attempts:
             report(attempt, response.status_code, latency_ms, None, detail)
@@ -407,7 +623,7 @@ async def post_json(
             raise TransientError(
                 f"HTTP {response.status_code} from {url} after {attempt} attempts"
                 f" and {elapsed():.1f}s; a {delay:.1f}s wait would exceed the"
-                f" {policy.max_total_seconds:.0f}s retry budget{said}",
+                f" {budget.source}{said}",
                 status=response.status_code,
                 body=body,
                 url=url,

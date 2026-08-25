@@ -431,3 +431,241 @@ def test_the_actionable_end_of_a_google_quota_message_survives() -> None:
         }
     )
     assert detail.endswith("limit: 20")
+
+
+@respx.mock
+async def test_the_run_budget_can_cut_a_call_short() -> None:
+    """`--max-seconds 300` was set and the run still died at 137s.
+
+    The flag had no path to the retry layer: every call got `DEFAULT_RETRY`'s
+    baked-in 90s and nothing else. The run's deadline now reaches inside.
+    """
+    seen: list[dict[str, float | None]] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        return httpx.Response(200, json={})
+
+    respx.post(URL).mock(side_effect=capture)
+
+    async with http.make_client() as client:
+        with http.run_budget(4.0):
+            await http.post_json(client, URL, {}, policy=http.RetryPolicy(max_total_seconds=90.0))
+
+    read = seen[0]["read"]
+    assert read is not None and read <= 4.0, "the run's budget bound the call"
+
+
+@respx.mock
+async def test_a_generous_run_budget_does_not_widen_the_call_ceiling() -> None:
+    """`min`, not "whichever was mentioned last".
+
+    A 600-second run does not license one 600-second retry sequence; the call
+    ceiling still exists to stop a single call from eating the whole run.
+    """
+    seen: list[dict[str, float | None]] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        return httpx.Response(200, json={})
+
+    respx.post(URL).mock(side_effect=capture)
+
+    async with http.make_client() as client:
+        with http.run_budget(600.0):
+            await http.post_json(client, URL, {}, policy=http.RetryPolicy(max_total_seconds=5.0))
+
+    read = seen[0]["read"]
+    assert read is not None and read <= 5.0
+
+
+def test_the_run_budget_is_restored_on_exit() -> None:
+    """Sequential runs in one process must not inherit each other's deadlines."""
+    with http.run_budget(5.0):
+        assert http._run_deadline.get() is not None
+    assert http._run_deadline.get() is None
+
+
+def test_the_binding_budget_is_named_so_the_error_can_say_whose() -> None:
+    started = http._clock()
+    call_only = http._budget(http.RetryPolicy(max_total_seconds=90.0), started)
+    assert call_only.source == "90s retry budget"
+
+    with http.run_budget(5.0):
+        run_bound = http._budget(http.RetryPolicy(max_total_seconds=90.0), started)
+    assert run_bound.source == "run's remaining time"
+    assert run_bound.remaining() is not None
+
+
+@respx.mock
+async def test_a_growing_requested_delay_is_a_spent_quota_not_a_busy_server(
+    no_sleep: list[float],
+) -> None:
+    """Observed live three times: 27.3s then 59.6s, while nothing progressed.
+
+    Each retry spends another request from the allowance it is waiting on, so
+    the wait the provider asks for goes *up*. Waiting longer is not the fix.
+    """
+    respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": (
+                            "You exceeded your current quota. * Quota exceeded for metric: "
+                            "generativelanguage.googleapis.com/"
+                            "generate_content_free_tier_requests, limit: 20 "
+                            "Please retry in 27.3s."
+                        )
+                    }
+                },
+            ),
+            httpx.Response(429, json={"error": {"message": "Please retry in 59.6s."}}),
+        ]
+    )
+
+    async with http.make_client() as client:
+        with pytest.raises(http.QuotaError) as exc_info:
+            await http.post_json(client, URL, {})
+
+    message = str(exc_info.value)
+    assert "out of allowance rather than busy" in message
+    assert "quota generate_content_free_tier_requests, limit 20" in message
+    assert "grew from 27.3s to 59.6s over this run" in message
+    assert no_sleep == [27.3], "waited once, then stopped instead of waiting longer"
+
+
+@respx.mock
+async def test_a_quota_error_is_not_transient(no_sleep: list[float]) -> None:
+    """The loop retries `TransientError` and must not retry this."""
+    assert not issubclass(http.QuotaError, http.TransientError)
+
+
+@respx.mock
+async def test_a_steady_requested_delay_still_earns_its_retries(
+    no_sleep: list[float],
+) -> None:
+    """A per-minute rate limit really does clear on its own."""
+    respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(429, json={"error": {"message": "Please retry in 5s."}}),
+            httpx.Response(429, json={"error": {"message": "Please retry in 5s."}}),
+            httpx.Response(200, json={"ok": True}),
+        ]
+    )
+
+    async with http.make_client() as client:
+        result = await http.post_json(client, URL, {})
+
+    assert result.attempts == 3
+    assert no_sleep == [5.0, 5.0]
+
+
+@respx.mock
+async def test_our_own_growing_backoff_is_not_read_as_the_providers(
+    no_sleep: list[float],
+) -> None:
+    """Backoff grows by construction. Reading it as the provider's escalation
+    would abort every retry sequence on its second attempt."""
+    respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(503),
+            httpx.Response(503),
+            httpx.Response(200, json={"ok": True}),
+        ]
+    )
+
+    async with http.make_client() as client:
+        result = await http.post_json(client, URL, {})
+
+    assert result.attempts == 3
+
+
+def test_a_quota_note_reads_well_when_the_vendor_named_nothing() -> None:
+    assert http._quota_note("plain old rate limit") == ""
+
+
+@respx.mock
+async def test_a_budget_clamped_timeout_is_attributed_to_us(no_sleep: list[float]) -> None:
+    """`ReadTimeout('')` blamed the network for a deadline we imposed.
+
+    The configured read timeout is 180s; the request died at 27.4s because the
+    remaining budget clamped it. That is our doing, and the message says so.
+    """
+    respx.post(URL).mock(side_effect=httpx.ReadTimeout(""))
+
+    async with http.make_client() as client:
+        with pytest.raises(http.TransientError) as exc_info:
+            await http.post_json(
+                client, URL, {}, policy=http.RetryPolicy(max_attempts=1, max_total_seconds=0.5)
+            )
+
+    message = str(exc_info.value)
+    assert "ReadTimeout after 0.5s" in message, "names the duration, not an empty string"
+    assert "ReadTimeout('')" not in message
+
+
+@respx.mock
+async def test_the_last_thing_the_provider_said_survives_a_transport_failure(
+    no_sleep: list[float],
+) -> None:
+    """The 429s that explained everything were discarded, and the run reported
+    `ReadTimeout('')` — a quota problem dressed as a network problem."""
+    respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(429, json={"error": {"message": "Quota exceeded, retry in 5s."}}),
+            httpx.ReadTimeout(""),
+        ]
+    )
+
+    async with http.make_client() as client:
+        with pytest.raises(http.TransientError) as exc_info:
+            await http.post_json(client, URL, {}, policy=http.RetryPolicy(max_attempts=2))
+
+    message = str(exc_info.value)
+    assert "last provider response was HTTP 429" in message
+    assert "Quota exceeded" in message
+
+
+@respx.mock
+async def test_the_escalation_is_noticed_across_calls_not_just_within_one(
+    no_sleep: list[float],
+) -> None:
+    """The loop now retries a failed step, so what used to be four attempts of
+    one call can be one attempt each of four calls. The growth that identifies a
+    spent quota has to be visible across that boundary or it is invisible."""
+    respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(429, json={"error": {"message": "Please retry in 20s."}}),
+            httpx.Response(429, json={"error": {"message": "Please retry in 55s."}}),
+        ]
+    )
+    policy = http.RetryPolicy(max_attempts=1)
+
+    async with http.make_client() as client:
+        with http.run_budget(300.0):
+            with pytest.raises(http.TransientError):
+                await http.post_json(client, URL, {}, policy=policy)
+            with pytest.raises(http.QuotaError, match="grew from 20.0s to 55.0s"):
+                await http.post_json(client, URL, {}, policy=policy)
+
+
+@respx.mock
+async def test_one_runs_quota_history_does_not_leak_into_the_next(
+    no_sleep: list[float],
+) -> None:
+    respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(429, json={"error": {"message": "Please retry in 20s."}}),
+            httpx.Response(429, json={"error": {"message": "Please retry in 55s."}}),
+        ]
+    )
+    policy = http.RetryPolicy(max_attempts=1)
+
+    async with http.make_client() as client:
+        for _ in range(2):
+            with http.run_budget(300.0):
+                with pytest.raises(http.TransientError) as exc_info:
+                    await http.post_json(client, URL, {}, policy=policy)
+                assert not isinstance(exc_info.value, http.QuotaError)

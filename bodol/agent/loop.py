@@ -61,6 +61,7 @@ from bodol.providers.base import (
     ToolUseBlock,
     Usage,
 )
+from bodol.providers.http import QuotaError, TransientError, run_budget
 from bodol.telemetry import events
 from bodol.tools import ToolRegistry
 
@@ -104,12 +105,20 @@ class Limits:
     six tools is one step. `max_tokens_per_call` is not exposed on the CLI; it
     mirrors the `Provider.generate` default so the loop is explicit about what
     it asks for.
+
+    `max_step_retries` is how many times a turn may be attempted again after the
+    provider fails transiently. Before it existed, one transient failure ended
+    the run outright: a run given 300 seconds died after 137 of them with 160
+    seconds of budget it was never able to spend. Not exposed on the CLI either,
+    for the same reason as `max_tokens_per_call` — the bounds a user reaches for
+    are time, cost and steps.
     """
 
     max_steps: int = 12
     max_cost_usd: float = 0.25
     max_seconds: float = 120.0
     max_tokens_per_call: int = 4096
+    max_step_retries: int = 2
 
 
 # The CLI's documented defaults, shared rather than constructed per call site.
@@ -193,7 +202,17 @@ class Agent:
         self.context_policy = context
 
     async def run(self, task: str) -> RunResult:
-        """Drive the task to a stop condition and report what happened."""
+        """Drive the task to a stop condition and report what happened.
+
+        The run's time budget is published here so the retry layer inside a call
+        can see it. Before that, the HTTP layer knew only its own 90-second
+        ceiling and `--max-seconds 300` bought nothing: the flag had no path to
+        the code that does the waiting.
+        """
+        with run_budget(self.limits.max_seconds):
+            return await self._run(task)
+
+    async def _run(self, task: str) -> RunResult:
         messages: list[Message] = [Message(role="user", content=(TextBlock(text=task),))]
         manager = ContextManager(self.context_policy) if self.context_policy else None
         started = _monotonic()
@@ -246,20 +265,54 @@ class Agent:
                     if breach is not None:
                         return result(breach)
 
+                    # Advanced once per turn, before the attempts. A step that
+                    # failed twice and then succeeded is one step in the trace,
+                    # which is the reading that tells you what happened; three
+                    # unrelated numbers is the reading that hides it.
                     events.advance_step()
-                    try:
-                        response = await provider.generate(
-                            messages,
-                            system=self.system,
-                            tools=self.tools.specs,
-                            max_tokens=self.limits.max_tokens_per_call,
-                        )
-                    except Exception as exc:
-                        # TracedProvider has already written the error record;
-                        # the loop's job is to report it, not to re-raise it.
-                        return result(
-                            StopReason.ERROR, error=f"{type(exc).__name__}: {exc}"
-                        )
+                    retries_left = self.limits.max_step_retries
+                    while True:
+                        try:
+                            response = await provider.generate(
+                                messages,
+                                system=self.system,
+                                tools=self.tools.specs,
+                                max_tokens=self.limits.max_tokens_per_call,
+                            )
+                            break
+                        except TransientError as exc:
+                            # The provider is busy, not broken, and the run may
+                            # still have time to spend. Ending here is how a run
+                            # with 160 unspent seconds reported failure.
+                            left = self.limits.max_seconds - (_monotonic() - started)
+                            if retries_left <= 0 or left <= 0:
+                                return result(
+                                    StopReason.ERROR,
+                                    error=f"{type(exc).__name__}: {exc}",
+                                )
+                            retries_left -= 1
+                            logger.info(
+                                progress.retry_line(
+                                    steps + 1,
+                                    type(exc).__name__,
+                                    retries_left,
+                                    self.limits.max_step_retries,
+                                    self.limits.max_seconds - left,
+                                    self.limits.max_seconds,
+                                )
+                            )
+                        except QuotaError as exc:
+                            # Not retried, deliberately. The allowance is spent,
+                            # and every further attempt spends more of it.
+                            return result(
+                                StopReason.ERROR, error=f"{type(exc).__name__}: {exc}"
+                            )
+                        except Exception as exc:
+                            # TracedProvider has already written the error record;
+                            # the loop's job is to report it, not to re-raise it.
+                            return result(
+                                StopReason.ERROR, error=f"{type(exc).__name__}: {exc}"
+                            )
 
                     steps += 1
                     usage = _merge_usage(usage, response.usage)
