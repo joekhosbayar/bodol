@@ -35,8 +35,8 @@ The default provider is `gemini:gemini-3.7-flash`; override per run with
 1. Loads a versioned system prompt from `prompts/<version>.md`
    (`--system v2` loads `v2.md`; an unknown version exits 2 and lists what
    exists).
-2. Registers three read-only tools — `calculator`, `file_read`, `grep` —
-   sandboxed to the working tree. Paths are resolved after symlink
+2. Registers four read-only tools — `calculator`, `file_read`, `grep`,
+   `list_files` — sandboxed to the working tree. Paths are resolved after symlink
    expansion and containment-checked, so `../` and outward symlinks are
    refused. Dotfiles are readable, `.env` included: a coding agent that
    cannot see `.gitignore` is crippled, and the sandbox already assumes you
@@ -71,9 +71,16 @@ Every run writes `traces/<trace_id>.jsonl`, one record per model call:
   "event": "call",
   "step": 1,
   "model": "claude-haiku-4-5-20251001",
-  "tokens": { "input": 591, "output": 59, "cached": 0, "reasoning": 0, "total": 650 },
+  "tokens": {
+    "input": 591, "output": 59, "cached": 0,
+    "cache_write": 0, "cache_write_1h": 0, "reasoning": 0, "total": 650
+  },
   "cost_usd": 0.000886,
-  "rates_usd_per_mtok": { "input": 1.0, "output": 5.0, "cached_input": 0.1 },
+  "cache_saved_usd": 0.0,
+  "rates_usd_per_mtok": {
+    "input": 1.0, "output": 5.0, "cached_input": 0.1,
+    "cache_write": 1.25, "cache_write_1h": 2.0
+  },
   "finish_reason": "tool_calls",
   "latency_ms": 812.4
 }
@@ -91,6 +98,46 @@ Rate cards (`bodol/data/pricing.yaml`) and context windows
 own pricing pages. Both files carry a VERIFY-BEFORE-TRUSTING header and the
 URLs to check against — prices change, and Gemini's current Flash rates
 double on 2027-01-01.
+
+## Prompt caching
+
+An agent loop reships its whole transcript on every step, so the same prefix
+is paid for again and again. Every vendor sells a discount on that — reads at
+a tenth of the input rate — and each one asks for it differently. Caching is
+**on by default**; `--no-cache` turns it off where that is possible.
+
+| | OpenAI (gpt-5.6+) | Anthropic | Gemini 3.x |
+| --- | --- | --- | --- |
+| Default | implicit, already on | **off unless asked** | implicit, already on |
+| What bodol sends | `prompt_cache_key`, `prompt_cache_options` | `cache_control` on the transcript, 1h on the system prompt | nothing to send |
+| Minimum cached prefix | 1,024 tokens | 4,096 Haiku 4.5 · 1,024 Sonnet 5 · 512 Opus 5 | 4,096 |
+| Write / read vs input | 1.25x / 0.1x | 1.25x (5m), 2x (1h) / 0.1x | no premium / 0.1x |
+| `--no-cache` | explicit mode, no breakpoints | `cache_control` omitted | **cannot be honoured** |
+
+Three things are worth knowing before reading a cache number:
+
+- **A short prefix is not cached, and no error says so.** A `cached: 0` on a
+  983-token call is the vendor's floor, not a misconfiguration. This is the
+  single most common reason a run shows no cache activity at all.
+- **A write costs more than fresh input.** Filling a cache is 1.25x (2x for
+  Anthropic's 1-hour tier), so the first call of a run is a loss and the
+  savings arrive later. `cache_saved_usd` is signed for exactly that reason:
+  a run that only wrote reports `cost $0.0003 to fill`, not a saving.
+- **Compaction and caching pull against each other.** Compaction rewrites the
+  middle of the transcript, which is what invalidates a cached prefix. Fewer
+  input tokens at the uncached rate can still beat more tokens at the cached
+  one — but it is a trade, not a free win, and the trace has both numbers in
+  it. On Haiku models a non-tool-result user turn (which is exactly what a
+  summary is) additionally strips prior thinking blocks from the prefix.
+
+Progress lines report cache activity as it happens, and the run summary
+totals it:
+
+```
+  step 3 · 2.1s · 9s/120s · $0.0011 · 4,842 tokens
+    cache · 3,072 of 4,096 in cached (75%)
+  done · 3 steps · $0.0011 · 4,842 tokens · cache 63% hit · 1,024 written · saved $0.0021
+```
 
 ## How it's put together
 
@@ -113,7 +160,7 @@ arithmetic to satisfy it.
 ## Development
 
 ```sh
-uv run pytest           # 223 tests, fully offline — nothing reaches a provider
+uv run pytest           # 353 tests, fully offline — nothing reaches a provider
 uv run ruff check .
 uv run mypy bodol tests # strict
 ```

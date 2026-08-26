@@ -8,16 +8,27 @@ Token accounting contract
 The three vendors disagree about what is nested inside what, so `Usage` fixes
 one convention and each adapter does the arithmetic to satisfy it:
 
-    input_tokens      ALL billed input, including anything served from cache
-    cached_tokens     the subset of input_tokens that was served from cache
-    output_tokens     ALL billed output, including reasoning/thinking
-    reasoning_tokens  the subset of output_tokens spent on reasoning
+    input_tokens           ALL billed input, cache reads and writes included
+    cached_tokens          the subset of input_tokens served from cache
+    cache_write_tokens     the subset written to cache at the default TTL
+    cache_write_1h_tokens  the subset written to a 1-hour cache
+    output_tokens          ALL billed output, including reasoning/thinking
+    reasoning_tokens       the subset of output_tokens spent on reasoning
+
+The three cache subsets are disjoint: a token is read from cache, or written to
+one of the two tiers, or neither. What is left over is ordinary uncached input.
+`Usage.input_buckets` does that split once, clamped, so pricing and progress
+lines cannot disagree about it.
 
 Per-adapter math, verified against tests/fixtures/toolcalls/:
 
     gemini-3.6-flash
         input     = usage.total_input_tokens
         cached    = usage.total_cached_tokens
+        writes    = 0, both tiers. Gemini's implicit cache is the only one it
+                    exposes on this API and it carries no write premium — a
+                    written token bills as ordinary input. Zero here means
+                    "not charged", not "nobody looked".
         output    = usage.total_output_tokens + usage.total_thought_tokens
         reasoning = usage.total_thought_tokens
 
@@ -26,8 +37,10 @@ Per-adapter math, verified against tests/fixtures/toolcalls/:
         total_output_tokens directly understates that call's output 20x.
 
     gpt-5.6-luna
-        input     = usage.input_tokens          (cached already included)
+        input     = usage.input_tokens          (cached and written included)
         cached    = usage.input_tokens_details.cached_tokens
+        write     = usage.input_tokens_details.cache_write_tokens
+        write_1h  = 0. There is one write rate and one TTL (30m) to choose.
         output    = usage.output_tokens         (reasoning already included)
         reasoning = usage.output_tokens_details.reasoning_tokens
 
@@ -36,8 +49,21 @@ Per-adapter math, verified against tests/fixtures/toolcalls/:
                   + usage.cache_read_input_tokens
                   + usage.cache_creation_input_tokens   (both EXCLUDED upstream)
         cached    = usage.cache_read_input_tokens
+        write     = usage.cache_creation.ephemeral_5m_input_tokens
+        write_1h  = usage.cache_creation.ephemeral_1h_input_tokens
+                    The flat cache_creation_input_tokens is the sum of the two,
+                    so it stands in for the 5m tier when the split is absent.
         output    = usage.output_tokens         (thinking already included)
         reasoning = usage.output_tokens_details.thinking_tokens, when present
+
+Cache minimums matter when reading a zero
+-----------------------------------------
+A prefix shorter than the vendor's floor is not cached at all, silently and
+without an error. `cached: 0` on a small call is the floor, not a bug:
+
+    openai      1,024 tokens on gpt-5.6 and later
+    anthropic   4,096 on Haiku 4.5 · 1,024 on Sonnet 5 · 512 on Opus 5
+    gemini      4,096 on 3.x Flash · 2,048 on 2.5
 
 `usage` keys vary by model *within* a vendor — Opus 5 carries
 `output_tokens_details`, Haiku 4.5 does not. Read with `.get()`, never `[...]`.
@@ -112,6 +138,24 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class InputBuckets:
+    """One call's input tokens split into the four classes that bill differently.
+
+    Always sums to `input_tokens`, so a caller can price it or render it without
+    re-deriving the remainder and getting a different answer.
+    """
+
+    uncached: int
+    cached: int
+    write: int
+    write_1h: int
+
+    @property
+    def total(self) -> int:
+        return self.uncached + self.cached + self.write + self.write_1h
+
+
+@dataclass(frozen=True, slots=True)
 class Usage:
     """Token counts under the containment contract in the module docstring."""
 
@@ -119,6 +163,8 @@ class Usage:
     output_tokens: int = 0
     cached_tokens: int = 0
     reasoning_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_write_1h_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -128,6 +174,27 @@ class Usage:
         don't agree on what it includes.
         """
         return self.input_tokens + self.output_tokens
+
+    @property
+    def input_buckets(self) -> InputBuckets:
+        """Split input into (uncached, cached, 5m write, 1h write).
+
+        Clamped to `input_tokens` rather than trusted, because the subsets come
+        from three different vendors' arithmetic and a sum that overshoots its
+        parent must not produce a negative fourth bucket. When it does overshoot,
+        the pricier tier is kept whole and the cheaper one absorbs the
+        truncation, so an inconsistent report costs more here rather than less.
+        """
+        remaining = self.input_tokens
+        # Claimed in descending order of price: 1h writes at 2x, 5m writes at
+        # 1.25x, then cache reads at 0.1x, which is what gets truncated.
+        write_1h = min(max(self.cache_write_1h_tokens, 0), remaining)
+        remaining -= write_1h
+        write = min(max(self.cache_write_tokens, 0), remaining)
+        remaining -= write
+        cached = min(max(self.cached_tokens, 0), remaining)
+        remaining -= cached
+        return InputBuckets(uncached=remaining, cached=cached, write=write, write_1h=write_1h)
 
 
 @dataclass(frozen=True, slots=True)

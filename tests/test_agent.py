@@ -36,6 +36,8 @@ def _response(
     finish_reason: FinishReason | None = None,
     input_tokens: int = 100,
     output_tokens: int = 10,
+    cached_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> ModelResponse:
     if finish_reason is None:
         finish_reason = FinishReason.TOOL_CALLS if tool_calls else FinishReason.STOP
@@ -44,7 +46,12 @@ def _response(
         model="fake-model",
         provider="fake",
         finish_reason=finish_reason,
-        usage=Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+        usage=Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+        ),
         latency_ms=1.0,
         text=text,
         tool_calls=tool_calls,
@@ -488,6 +495,100 @@ async def test_usage_is_summed_across_calls(install: InstallProvider) -> None:
     assert result.usage.input_tokens == 280, "billed input, not final transcript size"
     assert result.usage.output_tokens == 35
     assert result.usage.total_tokens == 315
+
+
+async def test_cache_tokens_are_summed_too(install: InstallProvider) -> None:
+    """A run's cache performance is a run-level number, so the subsets have to
+    survive the merge that the totals go through."""
+    install(
+        FakeProvider(
+            [
+                _response(tool_calls=(_tool_call(),), input_tokens=2000, cache_write_tokens=2000),
+                _response(text="done", input_tokens=2200, cached_tokens=2000),
+            ]
+        )
+    )
+
+    result = await Agent("fake:fake-model", tools=_weather_registry()).run("weather?")
+
+    assert result.usage.cache_write_tokens == 2000
+    assert result.usage.cached_tokens == 2000
+
+
+async def test_caching_is_requested_unless_turned_off(
+    install: InstallProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anthropic caches nothing without being asked, so the default has to be on
+    and `--no-cache` has to actually reach the adapter."""
+    seen: list[bool] = []
+    provider = FakeProvider(repeat=_response(text="done"))
+
+    def factory(*args: object, cache: bool = True, **kwargs: object) -> FakeProvider:
+        seen.append(cache)
+        return provider
+
+    monkeypatch.setattr(loop_module, "create_provider", factory)
+
+    await Agent("fake:fake-model").run("go")
+    await Agent("fake:fake-model", cache=False).run("go")
+
+    assert seen == [True, False]
+
+
+async def test_cache_activity_is_announced_while_it_happens(
+    install: InstallProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cache read changes what a call costs; nothing else in the terminal says
+    it happened."""
+    install(
+        FakeProvider(
+            [
+                _response(tool_calls=(_tool_call(),), input_tokens=2000, cache_write_tokens=2000),
+                _response(text="done", input_tokens=2500, cached_tokens=2000),
+            ]
+        )
+    )
+
+    with caplog.at_level("INFO", logger="bodol.agent.loop"):
+        await Agent("fake:fake-model", tools=_weather_registry()).run("weather?")
+
+    notices = [r.getMessage().strip() for r in caplog.records if "cache ·" in r.getMessage()]
+    assert notices == [
+        "cache · wrote 2,000 at 1.25x",
+        "cache · 2,000 of 2,500 in cached (80%)",
+    ]
+
+
+async def test_the_run_reports_what_caching_was_worth(
+    install: InstallProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signed, and negative on the call that fills the cache: a run that has only
+    paid the write premium has not saved anything yet."""
+    monkeypatch.setattr(
+        events,
+        "rates_for",
+        lambda provider, model: events.Rates(
+            input=1.00, output=5.00, cached_input=0.10, cache_write=1.25
+        ),
+    )
+    install(
+        FakeProvider(
+            [
+                _response(
+                    tool_calls=(_tool_call(),),
+                    input_tokens=1000,
+                    output_tokens=0,
+                    cache_write_tokens=1000,
+                ),
+                _response(text="done", input_tokens=1000, output_tokens=0, cached_tokens=1000),
+            ]
+        )
+    )
+
+    result = await Agent("fake:fake-model", tools=_weather_registry()).run("weather?")
+
+    # Paid 0.25x extra to write 1000, then saved 0.90x reading 1000 back.
+    assert result.cache_saved_usd == pytest.approx((-1000 * 0.25 + 1000 * 0.90) / 1e6)
 
 
 # ---------------------------------------------------------------- finish reasons

@@ -36,6 +36,7 @@ from bodol.providers.base import (
     ToolCall,
     ToolResultBlock,
     ToolUseBlock,
+    Usage,
 )
 
 # One argument value, then the whole argument list. Two limits rather than one
@@ -109,6 +110,34 @@ def retry_line(
         f" · {retries_left} of {retries_allowed} left"
         f" · {elapsed:.0f}s/{budget:g}s"
     )
+
+
+def cache_line(usage: Usage) -> str | None:
+    """What the vendor's prompt cache did on this call. None when it did nothing.
+
+    Silent on a call with no cache activity, and that silence is informative
+    rather than lazy: every vendor has a minimum cacheable prefix (1,024 tokens
+    on OpenAI, up to 4,096 on Anthropic and Gemini), below which nothing is
+    cached and no error is raised. An early call in a run legitimately has
+    nothing to report.
+
+    Reads are shown as a share of this call's input, because the share is the
+    number that says whether the prefix is holding still. Writes are shown as a
+    count with their premium named — a write is the cache costing you money, and
+    a run that writes on every call and never reads is paying 1.25x for nothing.
+    """
+    buckets = usage.input_buckets
+    parts: list[str] = []
+    if buckets.cached:
+        share = buckets.cached / usage.input_tokens * 100
+        parts.append(f"{buckets.cached:,} of {usage.input_tokens:,} in cached ({share:.0f}%)")
+    if buckets.write:
+        parts.append(f"wrote {buckets.write:,} at 1.25x")
+    if buckets.write_1h:
+        parts.append(f"wrote {buckets.write_1h:,} at 2x for 1h")
+    if not parts:
+        return None
+    return "cache · " + " · ".join(parts)
 
 
 def compact_line(

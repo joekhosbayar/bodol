@@ -1,0 +1,118 @@
+{
+  "id": "resp_0df9db1886240c0c006a8e5e501f1087d2884612ea2400b418",
+  "object": "response",
+  "created_at": 1787715152,
+  "status": "completed",
+  "background": false,
+  "billing": {
+    "payer": "developer"
+  },
+  "completed_at": 1787715152,
+  "error": null,
+  "frequency_penalty": 0.0,
+  "incomplete_details": null,
+  "instructions": "You are terse.",
+  "max_output_tokens": 256,
+  "max_tool_calls": null,
+  "model": "gpt-5.6-luna",
+  "moderation": null,
+  "output": [
+    {
+      "id": "rs_0df9db1886240c0c006a8e5e507bc087d2bc0c76ed6f9d42a6",
+      "type": "reasoning",
+      "content": [],
+      "encrypted_content": "gAAAAABqjl5RWD8HNVFPxv1bask46OVJqvnfEUqzKrthuxH2vfib0mkb6PB8gs8ksDJSTs9GaQ_p28AnYvbHL68ZUiJcP3DtBmMajbY8LCvGRBFq6bR3K2vUpaFbtJfQIn9tiDqxvmR_c2NoHG5-v1wxzziMU0XcoyBtuin_GJdJOtl65ulq-4DuPRJ2aOFIY9O4WqS5gBC_PBoWf064qBfL8VBjL-o1-upNw_9EBbL7TXGgilkovcjQV9Zjlg4J0q_WerMixGfKkiKjbkN1m7PoRUE374xihlObJb2SYbc5FbGydt5I8TVKaxYtJ5tvWNMvMYBv7AgsVA2FFcG4kENybSV9-fl0aSbsawUiAukObtOgVfChM0Oilc9r1HPXUdh9mdsJqPWMGsII8TAx0YhL49M6txCFVBUsBdb3hEnuKf4BCocOBlYtpxGbYGbcy4sO22WmuYOzEI1YGJui2RwFha1vW8ovg9jQdZIvtzxQ3aeeLjS5dKETKS8qC0NQZgVmoK7lLKJZlQcYXUeo6DC5g1CXeWF4b0IK27BtxHKP5lNhf0gNvt6kTZ5sAyLgwpfS56JKV9epkhkZjHAy3XG1KeaFnX-YADg1Wz_qLqsbTmOJpf87nizNzfD63upWiULL8K_WKdZv0VfIbMHP2hGPx6B2Qj7sULEVAI6f_smt5Rc6kco5BWHH1JJA-DAIJMIa4Y3eCoILcXT2Z-NL19Xp1Tb80nPqjWaIid41UyavfDYr0zz4HlPvJImLLObqva6uPYxoZ-bg_pjXVWwuB4hJTWICLn1p5db6pKVjFfIaTPgURAmBOGN4ftOkhFZHKBpuf5QRFdxs9CENeg71c0Wzcf_6UqaxzwV1ERYyBOjEyr3s8O1dN69uNm1pOoUTEbn9eUYu3qITYHIqPgZ6cW-WdecVAOYqRyokKLmdJlSKxkAERIceN1aufiSAom5T6b20-fXA6jDO2Wf7PagMp2pCACQYFzMpZbMI0Z_mfazW_P2aZrFZEix4tdUkKk9KNDFqUdi429JonYHCEFVuoeIKh38n1_7PW690LM7WstR3HvvhB6JbEjwazjSAje_SeXaA2bctpHiFe3YD129HV2oRUpM5VbI5DAlwmtybMsFU_aAqZ27ADvSgKcKQH4VBPPN_GkbhVBR1m_u8ETQ0hQnQZ_uGU-JdCzLtemNxua_BdxP44AXrNhbmjNvBhlmy20e22oy7bU1F",
+      "summary": []
+    },
+    {
+      "id": "fc_0df9db1886240c0c006a8e5e50b23087d282e6ac1aa590aeb9",
+      "type": "function_call",
+      "status": "completed",
+      "arguments": "{\"city\":\"Ulaanbaatar\"}",
+      "call_id": "call_825jzbvep71tYxY6sIVVVavY",
+      "name": "get_weather"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "previous_response_id": null,
+  "prompt_cache_key": "bodol:b0aaa52e0ad0720b",
+  "prompt_cache_options": {
+    "mode": "implicit",
+    "ttl": "30m"
+  },
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "all_turns",
+    "effort": "medium",
+    "mode": "standard",
+    "summary": null
+  },
+  "safety_identifier": null,
+  "service_tier": "default",
+  "store": true,
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "description": "Get the current weather for a city.",
+      "name": "get_weather",
+      "output_schema": null,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  ],
+  "top_logprobs": 0,
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 1954,
+    "input_tokens_details": {
+      "cache_write_tokens": 70,
+      "cached_tokens": 1881
+    },
+    "output_tokens": 32,
+    "output_tokens_details": {
+      "reasoning_tokens": 9
+    },
+    "total_tokens": 1986
+  },
+  "user": null,
+  "metadata": {}
+}

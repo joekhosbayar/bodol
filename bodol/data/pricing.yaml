@@ -27,30 +27,25 @@
 #
 #   cache_storage_per_hour   USD per 1M tokens per HOUR of residency
 #
-# Only `input`, `output`, and `cached_input` are read by the code today:
-# telemetry.events.Rates has three fields, and cost_usd splits input_tokens into
-# cached and uncached. The write keys are inert — the loader picks fields off
-# each mapping by name and ignores the rest. They are filled in now so that
-# turning caching on later is a code change against complete data, not a
-# scramble to backfill five rate cards under time pressure.
+# A prefix shorter than the vendor's minimum is not cached at all, silently:
+# 1,024 tokens on OpenAI gpt-5.6+, 4,096 on Haiku 4.5 / 1,024 on Sonnet 5 / 512
+# on Opus 5, 4,096 on Gemini 3.x Flash. A run whose cache columns are all zero is
+# usually under that floor rather than misconfigured.
 #
-# To finish the job later:
-#   1. Rates gains cache_write / cache_write_1h.
-#   2. Usage gains cache_write_tokens and cache_write_1h_tokens, as further
-#      SUBSETS of input_tokens — the same containment convention
-#      reasoning_tokens already uses inside output_tokens. See base.py.
-#   3. anthropic.py reads usage.cache_creation.ephemeral_5m_input_tokens and
-#      .ephemeral_1h_input_tokens, falling back to the flat
-#      cache_creation_input_tokens as 5m when the breakdown is absent. It
-#      currently folds that field into input_tokens and discards the split,
-#      which prices a write at 1.0x instead of 1.25x or 2x.
-#   4. cost_usd bills four buckets, with
-#      uncached = input - cached - write - write_1h.
+# All four input rates are live. `cost_usd` splits a call's input_tokens into
+# uncached / cached / write / write_1h via `Usage.input_buckets` and bills each
+# at its own rate, so the call that populates a cache is charged the premium it
+# actually cost. Before that split existed, a write billed at 1.0x — which
+# under-reported the first call of every run.
 #
-# cache_storage_per_hour cannot be attributed to a call at all: it accrues on
-# wall-clock residency, not on any request. It is recorded here for completeness
-# and belongs in a separate ledger keyed on cache lifetime, never in a call
-# record.
+# A null premium falls back to the plain `input` rate. That is the truth for
+# Gemini, whose implicit cache charges nothing extra to write, and the safe
+# assumption anywhere a vendor has not published one.
+#
+# cache_storage_per_hour is still NOT modelled, and cannot be: it accrues on
+# wall-clock residency rather than on any request, so no call record can carry
+# it. It belongs in a separate ledger keyed on cache lifetime. Recorded here for
+# completeness only.
 #
 # ---------------------------------------------------------------- not modelled
 #

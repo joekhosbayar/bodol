@@ -201,6 +201,94 @@ async def test_generate_posts_and_normalizes() -> None:
 
     body = json.loads(sent.content)
     assert body["model"] == "claude-haiku-4-5"
-    assert body["system"] == "You are terse."
     assert body["max_tokens"] == 512, "required by this API, unlike the other two"
     assert body["tools"][0]["input_schema"]["type"] == "object"
+
+
+# ---------------------------------------------------------------- caching
+
+
+def test_the_system_prompt_is_cached_for_an_hour() -> None:
+    """`cache_control` cannot ride on a bare string, so caching it means the
+    block form. The system prompt outlives a run; the conversation does not."""
+    rendered = anthropic._render_system("You are terse.", cache=True)
+
+    assert rendered == [
+        {
+            "type": "text",
+            "text": "You are terse.",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }
+    ]
+
+
+def test_without_caching_the_system_prompt_stays_a_string() -> None:
+    assert anthropic._render_system("You are terse.", cache=False) == "You are terse."
+
+
+@respx.mock
+async def test_caching_is_asked_for_by_default() -> None:
+    """This is the one adapter where doing nothing caches nothing."""
+    route = respx.post(URL).mock(
+        return_value=httpx.Response(200, json=load("toolcalls/claude_weather_0"))
+    )
+    adapter = anthropic.AnthropicAdapter("claude-haiku-4-5", api_key="k")
+    try:
+        await adapter.generate(
+            [Message("user", (TextBlock("weather?"),))], system="You are terse."
+        )
+    finally:
+        await adapter.aclose()
+
+    body = json.loads(route.calls.last.request.content)
+    # Automatic caching: the breakpoint follows the end of the transcript with
+    # no help from us, at the default 5-minute tier.
+    assert body["cache_control"] == {"type": "ephemeral"}
+    # A longer TTL must precede a shorter one, and the prefix order is
+    # tools -> system -> messages, so 1h on system is the legal arrangement.
+    assert body["system"][0]["cache_control"]["ttl"] == "1h"
+
+
+@respx.mock
+async def test_no_cache_sends_no_breakpoints_at_all() -> None:
+    route = respx.post(URL).mock(
+        return_value=httpx.Response(200, json=load("toolcalls/claude_weather_0"))
+    )
+    adapter = anthropic.AnthropicAdapter("claude-haiku-4-5", api_key="k", cache=False)
+    try:
+        await adapter.generate(
+            [Message("user", (TextBlock("weather?"),))], system="You are terse."
+        )
+    finally:
+        await adapter.aclose()
+
+    body = json.loads(route.calls.last.request.content)
+    assert "cache_control" not in body
+    assert body["system"] == "You are terse."
+
+
+def test_the_two_write_tiers_are_reported_apart() -> None:
+    """Folded together, a 2x write is billed as if it were 1.25x."""
+    raw = load("toolcalls/claude_weather_0")
+    raw["usage"] |= {
+        "cache_creation_input_tokens": 300,
+        "cache_creation": {
+            "ephemeral_5m_input_tokens": 100,
+            "ephemeral_1h_input_tokens": 200,
+        },
+    }
+
+    u = anthropic.normalize(raw).usage
+    assert (u.cache_write_tokens, u.cache_write_1h_tokens) == (100, 200)
+    assert u.input_tokens == 591 + 300, "writes are excluded upstream, so added back"
+
+
+def test_a_flat_creation_count_is_read_as_the_five_minute_tier() -> None:
+    """Older response shapes send the sum without the breakdown."""
+    raw = load("toolcalls/claude_weather_0")
+    raw["usage"] |= {"cache_creation_input_tokens": 250}
+    del raw["usage"]["cache_creation"]
+
+    u = anthropic.normalize(raw).usage
+    assert (u.cache_write_tokens, u.cache_write_1h_tokens) == (250, 0)
+    assert u.input_tokens == 591 + 250

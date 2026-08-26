@@ -77,6 +77,10 @@ def _usage(raw: dict[str, Any]) -> Usage:
         input_tokens=raw.get("total_input_tokens", 0),
         output_tokens=raw.get("total_output_tokens", 0) + thoughts,
         cached_tokens=raw.get("total_cached_tokens", 0),
+        # Both write buckets stay zero, and that is a fact about Gemini rather
+        # than a field nobody read: implicit caching is the only cache this API
+        # exposes, it reports no creation count, and it charges no write
+        # premium. A token written to it bills as ordinary input.
         reasoning_tokens=thoughts,
     )
 
@@ -218,9 +222,15 @@ class GeminiAdapter:
         api_key: str | None = None,
         client: httpx.AsyncClient | None = None,
         retry: http.RetryPolicy = http.DEFAULT_RETRY,
+        cache: bool = True,
     ) -> None:
         self.model = model
         self._retry = retry
+        # Accepted and then ignored, which is the honest implementation rather
+        # than an omission: implicit caching is the only cache this API exposes
+        # and there is no request field that turns it off. `--no-cache` cannot
+        # be honoured here, and the CLI says so instead of pretending.
+        self._cache = cache
         self._owns_client = client is None
         self._client = client or http.make_client(
             base_url=BASE_URL,

@@ -133,6 +133,10 @@ class RunResult:
     if compaction ran, since that is what the model actually had in front of
     it. `cost_usd` covers the priced calls only; `unpriced_calls` says how many
     calls it does not account for.
+
+    `cache_saved_usd` is signed: negative while the run has paid the write
+    premium without yet reading anything back. A run of one call is expected to
+    be negative, and reporting that as a saving would be the flattering lie.
     """
 
     text: str | None
@@ -144,6 +148,7 @@ class RunResult:
     trace_id: str | None
     messages: tuple[Message, ...] = ()
     error: str | None = None
+    cache_saved_usd: float = 0.0
 
 
 def _merge_usage(total: Usage, add: Usage) -> Usage:
@@ -157,6 +162,8 @@ def _merge_usage(total: Usage, add: Usage) -> Usage:
         output_tokens=total.output_tokens + add.output_tokens,
         cached_tokens=total.cached_tokens + add.cached_tokens,
         reasoning_tokens=total.reasoning_tokens + add.reasoning_tokens,
+        cache_write_tokens=total.cache_write_tokens + add.cache_write_tokens,
+        cache_write_1h_tokens=total.cache_write_1h_tokens + add.cache_write_1h_tokens,
     )
 
 
@@ -193,6 +200,7 @@ class Agent:
         limits: Limits = DEFAULT_LIMITS,
         system: str | None = None,
         context: ContextPolicy | None = None,
+        cache: bool = True,
     ) -> None:
         self.spec = provider
         self.default_family = default_family
@@ -200,6 +208,7 @@ class Agent:
         self.limits = limits
         self.system = system
         self.context_policy = context
+        self.cache = cache
 
     async def run(self, task: str) -> RunResult:
         """Drive the task to a stop condition and report what happened.
@@ -220,6 +229,7 @@ class Agent:
         cost = 0.0
         unpriced = 0
         usage = Usage()
+        cache_saved = 0.0
 
         with events.start_trace() as trace_id:
 
@@ -254,11 +264,14 @@ class Agent:
                     trace_id=trace_id,
                     messages=tuple(messages),
                     error=error,
+                    cache_saved_usd=round(cache_saved, 10),
                 )
 
             # Before the adapter exists, so a construction failure is not
             # charged against the trace as a run outcome.
-            provider = create_provider(self.spec, default_family=self.default_family)
+            provider = create_provider(
+                self.spec, default_family=self.default_family, cache=self.cache
+            )
             try:
                 while True:
                     breach = self._breached(steps=steps, cost=cost, started=started)
@@ -316,13 +329,15 @@ class Agent:
 
                     steps += 1
                     usage = _merge_usage(usage, response.usage)
-                    call_cost = events.cost_usd(
-                        response.usage, events.rates_for(response.provider, response.model)
-                    )
+                    rates = events.rates_for(response.provider, response.model)
+                    call_cost = events.cost_usd(response.usage, rates)
                     if call_cost is None:
                         unpriced += 1
                     else:
                         cost += call_cost
+                    saved = events.cache_savings(response.usage, rates)
+                    if saved is not None:
+                        cache_saved += saved
                     if manager is not None:
                         manager.observe(response)
 
@@ -338,6 +353,9 @@ class Agent:
                             tokens_total=usage.total_tokens,
                         )
                     )
+                    cache = progress.cache_line(response.usage)
+                    if cache is not None:
+                        logger.info("  %s", cache)
                     prose = progress.text_line(response)
                     if prose is not None:
                         logger.info("  %s", prose)

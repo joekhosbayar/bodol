@@ -15,10 +15,37 @@ Two things make this adapter the odd one out:
 Conversation state: `previous_response_id` is deliberately unused, matching the
 Gemini adapter. Bodol owns the transcript and resends it so the context manager
 has something to manage.
+
+Caching is already on when you do nothing: gpt-5.6 and later place an implicit
+breakpoint at the end of the latest eligible message, which suits an append-only
+transcript exactly. Two things are still worth sending, and one is worth knowing:
+
+    prompt_cache_key       Cache entries live on individual machines. Above
+                           roughly 15 requests a minute a request can overflow
+                           to a machine that holds no matching entry, and the
+                           key is what keeps requests sharing a prefix routed
+                           together. It is derived from the prefix itself, so
+                           two runs with the same system prompt and tools group
+                           without anything having to be plumbed through.
+
+    prompt_cache_options   `mode: implicit` is the default and is stated anyway,
+                           because `mode: explicit` with no breakpoints is how
+                           caching is turned *off* here — there is no boolean.
+                           `ttl: 30m` is the only supported value.
+
+    instructions           Cannot carry an explicit breakpoint. Placing one
+                           after the system prompt would mean moving it into a
+                           developer message; the implicit breakpoint already
+                           covers the growing-prefix case, so that trade is not
+                           made here.
+
+Below 1,024 visible input tokens nothing is cached, silently. A `cached: 0` on a
+small early call is that floor, not a failure.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -49,12 +76,16 @@ ENDPOINT = "/v1/responses"
 
 
 def _usage(raw: dict[str, Any]) -> Usage:
+    input_details = raw.get("input_tokens_details") or {}
     return Usage(
         # Both details blocks are subsets of their parent, so no arithmetic —
         # the opposite of Gemini and Anthropic. See the contract in base.py.
         input_tokens=raw.get("input_tokens", 0),
         output_tokens=raw.get("output_tokens", 0),
-        cached_tokens=(raw.get("input_tokens_details") or {}).get("cached_tokens", 0),
+        cached_tokens=input_details.get("cached_tokens", 0),
+        # Billed at 1.25x plain input on gpt-5.6 and later. There is no 1-hour
+        # tier to report: one write rate, one TTL.
+        cache_write_tokens=input_details.get("cache_write_tokens", 0),
         reasoning_tokens=(raw.get("output_tokens_details") or {}).get("reasoning_tokens", 0),
     )
 
@@ -144,6 +175,28 @@ def _render_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     ]
 
 
+def _cache_key(system: str | None, tools: Sequence[ToolSpec]) -> str:
+    """A routing key for every request that shares this prefix.
+
+    Derived from the prefix rather than from the run, because a per-run key would
+    group a run only with itself and throw away the reuse across runs that the
+    5-minute-plus cache lifetime is there to provide. Two runs with the same
+    system prompt and the same tools want the same machine.
+
+    A digest, not the content: the key is a request field the vendor logs, and
+    the system prompt is not something to put in one.
+    """
+    material = json.dumps(
+        {
+            "system": system or "",
+            "tools": [[t.name, t.description, t.parameters] for t in tools],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "bodol:" + hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
 def _render_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for msg in messages:
@@ -199,9 +252,11 @@ class OpenAIAdapter:
         api_key: str | None = None,
         client: httpx.AsyncClient | None = None,
         retry: http.RetryPolicy = http.DEFAULT_RETRY,
+        cache: bool = True,
     ) -> None:
         self.model = model
         self._retry = retry
+        self._cache = cache
         self._owns_client = client is None
         self._client = client or http.make_client(
             base_url=BASE_URL,
@@ -225,6 +280,14 @@ class OpenAIAdapter:
             payload["instructions"] = system
         if tools:
             payload["tools"] = _render_tools(tools)
+        if self._cache:
+            payload["prompt_cache_key"] = _cache_key(system, tools)
+            payload["prompt_cache_options"] = {"mode": "implicit", "ttl": "30m"}
+        else:
+            # Explicit mode with no breakpoints anywhere: documented as reading
+            # from no cache and writing to none. The nearest thing to an off
+            # switch this API has.
+            payload["prompt_cache_options"] = {"mode": "explicit"}
 
         result = await http.post_json(self._client, ENDPOINT, payload, policy=self._retry)
         return normalize(result.body, latency_ms=result.latency_ms)
