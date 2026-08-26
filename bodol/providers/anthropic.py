@@ -7,6 +7,30 @@ transcript ships on every call — which is why input tokens grew 591 -> 676
 across the captured pair while only a tool result was transmitted. Prompt
 caching, not server-side state, is what makes that affordable.
 
+Caching here is opt-in, and this is the only adapter where that is true: OpenAI
+and Gemini cache implicitly whether you ask or not, while Anthropic caches
+nothing at all without `cache_control`. Two breakpoints are sent when caching is
+on:
+
+    system      explicit, ttl 1h. The system prompt outlives any single run, so
+                the tier that survives an hour is the one worth paying 2x to
+                write once.
+    messages    top-level `cache_control`, the default 5-minute tier. This is
+                automatic caching: the breakpoint moves to the last cacheable
+                block by itself as the transcript grows, which is exactly the
+                append-only shape the loop produces.
+
+The order is not arbitrary. Prefixes are built `tools` -> `system` -> `messages`,
+and a longer TTL has to appear before a shorter one, so system-at-1h ahead of
+messages-at-5m is the one arrangement the API accepts.
+
+A breakpoint under the model's minimum cacheable length writes nothing, silently
+and without an error. That floor is 4,096 tokens on Haiku 4.5 against a system
+prompt plus tool schemas of roughly 1,200, so on Haiku the 1-hour entry does
+nothing until the transcript itself clears the floor; on Sonnet 5 (1,024) and
+Opus 5 (512) it works from the first call. Sending it costs nothing either way:
+an unwritten cache is an unbilled one.
+
 Its message model is the closest of the three to Bodol's own: a list of turns,
 each holding content blocks. `_render_messages` is nearly an identity mapping.
 The one structural oddity is that tool results ride in a `user` message — there
@@ -64,17 +88,42 @@ _FINISH_REASONS = {
 # ---------------------------------------------------------------- response
 
 
+def _writes(raw: dict[str, Any]) -> tuple[int, int]:
+    """Cache-creation tokens as (5-minute tier, 1-hour tier).
+
+    The two tiers bill differently — 1.25x and 2x plain input — so folding them
+    together, as this adapter used to, prices every cache write as if it were
+    ordinary input. The flat `cache_creation_input_tokens` is documented as the
+    sum of the breakdown, so it stands in for the 5m tier when only the flat
+    field is present (Haiku 4.5 sends both; older shapes may not).
+    """
+    flat: int = raw.get("cache_creation_input_tokens", 0)
+    split = raw.get("cache_creation") or {}
+    if not split:
+        return flat, 0
+    write_1h: int = split.get("ephemeral_1h_input_tokens", 0)
+    write_5m: int = split.get("ephemeral_5m_input_tokens", max(flat - write_1h, 0))
+    return write_5m, write_1h
+
+
 def _usage(raw: dict[str, Any]) -> Usage:
     cache_read: int = raw.get("cache_read_input_tokens", 0)
+    write_5m, write_1h = _writes(raw)
     return Usage(
         # input_tokens EXCLUDES both cache buckets upstream — the opposite of
         # OpenAI, where cached_tokens is already a subset. See base.py.
         input_tokens=(
-            raw.get("input_tokens", 0) + cache_read + raw.get("cache_creation_input_tokens", 0)
+            raw.get("input_tokens", 0)
+            + cache_read
+            # max() rather than the flat field alone: the two must agree, and if
+            # they ever disagree the larger is the one we were billed for.
+            + max(raw.get("cache_creation_input_tokens", 0), write_5m + write_1h)
         ),
         # Thinking is already inside output_tokens.
         output_tokens=raw.get("output_tokens", 0),
         cached_tokens=cache_read,
+        cache_write_tokens=write_5m,
+        cache_write_1h_tokens=write_1h,
         # Present on Opus 5, absent entirely on Haiku 4.5 — the usage schema
         # varies by model within this one provider, so never index.
         reasoning_tokens=(raw.get("output_tokens_details") or {}).get("thinking_tokens", 0),
@@ -133,6 +182,24 @@ def _render_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     ]
 
 
+def _render_system(system: str, *, cache: bool) -> str | list[dict[str, Any]]:
+    """The system prompt, as a plain string or as one cacheable block.
+
+    `cache_control` cannot ride on a bare string, so caching the system prompt
+    means sending the block form. Without caching it stays a string — the
+    shorter shape, and the one every existing fixture was captured with.
+    """
+    if not cache:
+        return system
+    return [
+        {
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }
+    ]
+
+
 def _render_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
     rendered: list[dict[str, Any]] = []
     for msg in messages:
@@ -185,9 +252,11 @@ class AnthropicAdapter:
         api_key: str | None = None,
         client: httpx.AsyncClient | None = None,
         retry: http.RetryPolicy = http.DEFAULT_RETRY,
+        cache: bool = True,
     ) -> None:
         self.model = model
         self._retry = retry
+        self._cache = cache
         self._owns_client = client is None
         self._client = client or http.make_client(
             base_url=BASE_URL,
@@ -212,9 +281,13 @@ class AnthropicAdapter:
             "messages": _render_messages(messages),
         }
         if system:
-            payload["system"] = system
+            payload["system"] = _render_system(system, cache=self._cache)
         if tools:
             payload["tools"] = _render_tools(tools)
+        if self._cache:
+            # Automatic caching: the breakpoint tracks the end of the transcript
+            # on its own, so nothing here has to be updated as the run grows.
+            payload["cache_control"] = {"type": "ephemeral"}
 
         result = await http.post_json(self._client, ENDPOINT, payload, policy=self._retry)
         return normalize(result.body, latency_ms=result.latency_ms)

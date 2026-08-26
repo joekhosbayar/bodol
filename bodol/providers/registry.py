@@ -103,8 +103,14 @@ def create_provider(
     api_key: str | None = None,
     client: httpx.AsyncClient | None = None,
     retry: RetryPolicy = DEFAULT_RETRY,
+    cache: bool = True,
 ) -> Provider:
-    """Construct the selected adapter and atomically wrap it for telemetry."""
+    """Construct the selected adapter and atomically wrap it for telemetry.
+
+    `cache` asks the vendor to reuse the prompt prefix. On by default, matching
+    what OpenAI and Gemini do whether asked or not; Anthropic caches only when
+    asked, and Gemini cannot be asked to stop.
+    """
     family, model = parse_provider_spec(value, default_family=default_family)
     trace_id = events.current_trace_id()
     if trace_id is None:
@@ -128,7 +134,7 @@ def create_provider(
     if retry.on_attempt is None:
         retry = dataclasses.replace(retry, on_attempt=_retry_recorder(sink, family, model))
     try:
-        adapter = adapter_type(model, api_key=api_key, client=client, retry=retry)
+        adapter = adapter_type(model, api_key=api_key, client=client, retry=retry, cache=cache)
     except config.MissingCredential as exc:
         sink.close()
         raise ProviderCredentialError(

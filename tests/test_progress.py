@@ -64,6 +64,44 @@ def test_the_budget_is_shown_without_a_pointless_decimal() -> None:
     assert "0s/0.5s" in fractional, "a real fraction still survives"
 
 
+# ------------------------------------------------------------- cache
+
+
+def test_a_cache_read_is_reported_as_a_share_of_this_calls_input() -> None:
+    """The share is the number that says whether the prefix is holding still."""
+    line = progress.cache_line(Usage(input_tokens=16_159, output_tokens=100, cached_tokens=12_000))
+
+    assert line == "cache · 12,000 of 16,159 in cached (74%)"
+
+
+def test_a_write_names_its_premium() -> None:
+    """A write is the cache costing money, not saving it."""
+    line = progress.cache_line(Usage(input_tokens=4_096, cache_write_tokens=4_096))
+
+    assert line == "cache · wrote 4,096 at 1.25x"
+
+
+def test_the_1h_tier_is_reported_separately() -> None:
+    line = progress.cache_line(
+        Usage(
+            input_tokens=5_000,
+            cached_tokens=2_000,
+            cache_write_tokens=1_800,
+            cache_write_1h_tokens=1_200,
+        )
+    )
+
+    assert line == (
+        "cache · 2,000 of 5,000 in cached (40%) · wrote 1,800 at 1.25x · wrote 1,200 at 2x for 1h"
+    )
+
+
+def test_no_cache_activity_says_nothing() -> None:
+    """Below the vendor's minimum prefix nothing is cached and no error is
+    raised, so an early call legitimately has nothing to report."""
+    assert progress.cache_line(Usage(input_tokens=983, output_tokens=210)) is None
+
+
 # ------------------------------------------------------------- compaction
 
 

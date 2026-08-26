@@ -268,3 +268,89 @@ async def test_generate_posts_and_normalizes() -> None:
     assert body["max_output_tokens"] == 512
     assert body["tools"][0]["name"] == "get_weather", "flat shape, no 'function' wrapper"
     assert "function" not in body["tools"][0]
+
+
+# ---------------------------------------------------------------- caching
+
+
+def test_the_cache_key_is_derived_from_the_prefix_not_the_run() -> None:
+    """A per-run key would group a run only with itself and throw away the reuse
+    the cache lifetime exists to provide."""
+    key = openai._cache_key("You are terse.", [WEATHER_TOOL])
+
+    assert key == openai._cache_key("You are terse.", [WEATHER_TOOL]), "stable"
+    assert key.startswith("bodol:")
+    assert "terse" not in key, "a digest — the key is a field the vendor logs"
+
+
+def test_changing_the_prefix_changes_the_cache_key() -> None:
+    """Tools render ahead of everything, so a different tool set is a different
+    prefix and must not be routed to the same entry."""
+    other = ToolSpec(name="get_time", description="Time.", parameters={"type": "object"})
+
+    assert openai._cache_key("You are terse.", [WEATHER_TOOL]) != openai._cache_key(
+        "You are terse.", [other]
+    )
+    assert openai._cache_key("You are terse.", []) != openai._cache_key("Be verbose.", [])
+
+
+@respx.mock
+async def test_caching_asks_for_implicit_mode_and_a_routing_key() -> None:
+    route = respx.post(URL).mock(
+        return_value=httpx.Response(200, json=load("toolcalls/openai_weather_0"))
+    )
+    adapter = openai.OpenAIAdapter("gpt-5.6-luna", api_key="k")
+    try:
+        await adapter.generate(
+            [Message("user", (TextBlock("weather?"),))],
+            system="You are terse.",
+            tools=[WEATHER_TOOL],
+        )
+    finally:
+        await adapter.aclose()
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+    assert body["prompt_cache_key"] == openai._cache_key("You are terse.", [WEATHER_TOOL])
+
+
+@respx.mock
+async def test_no_cache_uses_explicit_mode_with_no_breakpoints() -> None:
+    """The nearest thing to an off switch: explicit mode with nothing marked
+    reads from no cache and writes to none."""
+    route = respx.post(URL).mock(
+        return_value=httpx.Response(200, json=load("toolcalls/openai_weather_0"))
+    )
+    adapter = openai.OpenAIAdapter("gpt-5.6-luna", api_key="k", cache=False)
+    try:
+        await adapter.generate([Message("user", (TextBlock("weather?"),))], system="terse")
+    finally:
+        await adapter.aclose()
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["prompt_cache_options"] == {"mode": "explicit"}
+    assert "prompt_cache_key" not in body
+    assert "prompt_cache_breakpoint" not in json.dumps(body["input"])
+
+
+def test_a_cache_write_is_reported_and_no_1h_tier_exists() -> None:
+    """Captured live: a 1,881-token prefix over the 1,024 floor, first sighting.
+
+    `cache_write_tokens` sat in every earlier fixture at zero and went unread,
+    so this call used to price as plain input at 1.0x instead of 1.25x.
+    """
+    u = openai.normalize(load("toolcalls/openai_cache_write")).usage
+
+    assert (u.cached_tokens, u.cache_write_tokens) == (0, 1881), "nothing to read yet"
+    assert u.cache_write_1h_tokens == 0, "one write rate, one TTL"
+    assert u.input_tokens == 1884, "the write is already inside the input total"
+
+
+def test_a_cache_read_bills_three_ways_at_once() -> None:
+    """The same prefix on the next call: read back, with the new tail written."""
+    u = openai.normalize(load("toolcalls/openai_cache_read")).usage
+
+    assert (u.cached_tokens, u.cache_write_tokens) == (1881, 70)
+    buckets = u.input_buckets
+    assert (buckets.uncached, buckets.cached, buckets.write) == (3, 1881, 70)
+    assert buckets.total == u.input_tokens == 1954, "the split accounts for every token"

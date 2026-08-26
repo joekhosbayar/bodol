@@ -1,0 +1,125 @@
+{
+  "id": "resp_0d0fe4d72936e85b006a8e5e4e2ae087d28fb6df4a1cea8cee",
+  "object": "response",
+  "created_at": 1787715150,
+  "status": "completed",
+  "background": false,
+  "billing": {
+    "payer": "developer"
+  },
+  "completed_at": 1787715151,
+  "error": null,
+  "frequency_penalty": 0.0,
+  "incomplete_details": null,
+  "instructions": "You are terse.",
+  "max_output_tokens": 256,
+  "max_tool_calls": null,
+  "model": "gpt-5.6-luna",
+  "moderation": null,
+  "output": [
+    {
+      "id": "rs_0d0fe4d72936e85b006a8e5e4ef5b487d28668b2fbcf8ae685",
+      "type": "reasoning",
+      "content": [],
+      "encrypted_content": "gAAAAABqjl5P1PGTDalTImQdUHJFbuBCfxR8wfVjxk7B9xQlLLirKf5YlEgE4sMRS2fXKQkDOEIJ3JI-HrhuPcUJL4IK95g4GROZ6KyJe9yCFHtXiQBc01QYaUfADEIo4P1HvHtPd-wcr0g_XwCssiWc8Q6K45yCWzQLmidhOxBxV8TyCuNa6lXHJ3cTDm1RnDGkxZOW-MXgwEvEsFd49kRVBSV1nrbQTKAaPG_7KGL0WkMf3yUSoZK8ME_89HJgxAheXjPfg8vp6R0GdRpehP6i_bYy-sjAeoO2O25O9t2zGv6ehYLguKcUE3jBhN4-cS2I6xkymma_tHyNVdiBLwzZzLO2XeupOXG1w_FMlhT9qdnEfwLeVifOjcgWfu75axBJHkQc-H4XBYdVHfEFml2SZH-a_ynjhl7VGrvF64_A8BmxOx7cG1CUXHKlwBEfv5ajKcE-xGmP8xtNYDXpbim7W1whB2i1yF3JkFHnU-Obaykc0d5eHfo9azEC90RveAJBU8qSwd8ax8Tgk556A9sb6ImEvqUWgZg-FFK5KVo-9zioMSzSALpziGgc_Lqj5PEVbHkWgBc2Kg3fveIAqOKxn7Q9UMnOGyqbg3vlz5N0HDNXsJyNuejpYXz53Q2t5TMn599bemMLD1LrI7rkFHC7ktkeOtttGuRpOngKEJJ410ItcxVnYFNyaKC8rkZ2q7eLVqA96iRstZI-KNZx7SG2A8RpeXG9lePrgF3fOrddJZycETZzfYgQFReabh84dZbSOqzObhzf6haO1n7ZdZS5Nwo3qAZcshJdRjrQRkHo5z0cueq6vLA-yy6Y0YiAP3SpZ0azjobgp7yzTy87P52H09bji9C3I9071at4SJT9a1mL_YzYEDNIj0zMyv4f5rbr3-PWn6CK0-eK7sKpqLUUFZJmQvmdWsrTblGfrYHAfdvklxFP8E1moTzlwGm1W-A9dXk6yRgLddPsJAddpZ5nvIYrSe5ZjlMqKCXB_8Cik1y-MrO3ex9sYI4CIgs47diw39ueIuKKuiPYrFQigDA-6Nndqeq8hCz_jlonIZUrUeYrL1XE2WvwmN4TTN98EycxPfmVulEqwY6mJm8MNCwts3zj1PrLxpjV64VPLb8Pr_IG-EWt2XpN85jUImDcwm1wa3MApWtkMaX2H5CBHibFS-xmj3PzqCb4E4_nFf_iNuI1C2v8Piq8O4h_XM0qIHSQV4iNjEYD-mxJz5t2TmxKAzx5QNOGn4dbbl0unD5zEnuil6hF-Aqiabu5C8_8qAKwogUCSiozhk2OLXHIUVnd50qxvw4R0bw7NFhRpd7c0ZT1ByQSSA6-7aAiKJ-nW2VpVVr_HmjeZqwGnmBV8mxd5R0DfTzdwA==",
+      "summary": []
+    },
+    {
+      "id": "msg_0d0fe4d72936e85b006a8e5e4f4f2c87d28935ae01614ec2f0",
+      "type": "message",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "annotations": [],
+          "logprobs": [],
+          "text": "Understood. The data follows these patterns:\n\n- Total stations in district *n*: **137n**\n- Hourly stations: **11n**\n- Daily stations: **126n**\n- Districts covered: **1\u201359**"
+        }
+      ],
+      "phase": "final_answer",
+      "role": "assistant"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "previous_response_id": null,
+  "prompt_cache_key": "bodol:b0aaa52e0ad0720b",
+  "prompt_cache_options": {
+    "mode": "implicit",
+    "ttl": "30m"
+  },
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "all_turns",
+    "effort": "medium",
+    "mode": "standard",
+    "summary": null
+  },
+  "safety_identifier": null,
+  "service_tier": "default",
+  "store": true,
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "description": "Get the current weather for a city.",
+      "name": "get_weather",
+      "output_schema": null,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  ],
+  "top_logprobs": 0,
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 1884,
+    "input_tokens_details": {
+      "cache_write_tokens": 1881,
+      "cached_tokens": 0
+    },
+    "output_tokens": 83,
+    "output_tokens_details": {
+      "reasoning_tokens": 29
+    },
+    "total_tokens": 1967
+  },
+  "user": null,
+  "metadata": {}
+}

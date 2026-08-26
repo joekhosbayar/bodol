@@ -76,6 +76,32 @@ def _payload(result: RunResult) -> dict[str, Any]:
     return data
 
 
+def _cache_summary(result: RunResult) -> str | None:
+    """The run's cache performance, or None when there was none to report.
+
+    The hit rate is over billed input tokens across the whole run, which is the
+    denominator that matches the money. The signed dollar figure is what caching
+    actually did: `saved` when reads outran the write premium, `cost` when the
+    run paid to fill a cache it never read back — a two-step run usually does,
+    and calling that a saving would be a lie in the flattering direction.
+    """
+    usage = result.usage
+    written = usage.cache_write_tokens + usage.cache_write_1h_tokens
+    if not usage.cached_tokens and not written:
+        return None
+
+    parts = []
+    if usage.input_tokens:
+        parts.append(f"cache {usage.cached_tokens / usage.input_tokens * 100:.0f}% hit")
+    if written:
+        parts.append(f"{written:,} written")
+    if result.cache_saved_usd >= 0:
+        parts.append(f"saved ${result.cache_saved_usd:.4f}")
+    else:
+        parts.append(f"cost ${-result.cache_saved_usd:.4f} to fill")
+    return " · ".join(parts)
+
+
 def _report(result: RunResult) -> None:
     """Answer to stdout, one summary line to stderr."""
     if result.text:
@@ -98,6 +124,9 @@ def _report(result: RunResult) -> None:
         f"${result.cost_usd:.4f}",
         f"{result.usage.total_tokens:,} tokens",
     ]
+    cache = _cache_summary(result)
+    if cache:
+        parts.append(cache)
     if result.unpriced_calls:
         parts.append(
             f"cost covers {result.steps - result.unpriced_calls} of {result.steps} calls"
@@ -188,6 +217,16 @@ def run(
             help="Turns kept verbatim at the tail when compaction fires.",
         ),
     ] = 2,
+    no_cache: Annotated[
+        bool,
+        typer.Option(
+            "--no-cache",
+            help=(
+                "Stop asking the provider to reuse the prompt prefix. Caching is"
+                " on by default; turn it off to measure what it is worth."
+            ),
+        ),
+    ] = False,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the whole RunResult as JSON.")
     ] = False,
@@ -198,6 +237,16 @@ def run(
     except prompts.PromptError as exc:
         known = ", ".join(prompts.available()) or "none found"
         _die(f"{exc}\n  available prompt versions: {known}")
+
+    # Gemini's cache is implicit and has no off switch, so the flag would
+    # silently do nothing there. Saying so costs one line and saves an A/B
+    # comparison that would have shown no difference for the wrong reason.
+    if no_cache and provider.split(":", 1)[0].strip().lower() == "gemini" and not json_output:
+        typer.secho(
+            "  --no-cache: gemini caches implicitly with no opt-out; it stays on",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
 
     # A manual budget overrides the derived one, and works even when the
     # model's window is unknown — which is the point: it makes compaction
@@ -233,6 +282,7 @@ def run(
         ),
         system=system,
         context=policy,
+        cache=not no_cache,
     )
     try:
         with _live_notices():

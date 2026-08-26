@@ -84,6 +84,8 @@ class Rates:
     input: float | None = None
     output: float | None = None
     cached_input: float | None = None
+    cache_write: float | None = None
+    cache_write_1h: float | None = None
 
     @property
     def priceable(self) -> bool:
@@ -103,6 +105,8 @@ def _pricing_table() -> dict[str, Rates]:
                 input=(rates or {}).get("input"),
                 output=(rates or {}).get("output"),
                 cached_input=(rates or {}).get("cached_input"),
+                cache_write=(rates or {}).get("cache_write"),
+                cache_write_1h=(rates or {}).get("cache_write_1h"),
             )
     return table
 
@@ -111,28 +115,57 @@ def rates_for(provider: str, model: str) -> Rates:
     return _pricing_table().get(f"{provider}:{pricing_key(model)}", Rates())
 
 
+PER_MTOK = 1_000_000
+
+
 def cost_usd(usage: Usage, rates: Rates) -> float | None:
     """None when the model has no published rates — an unpriced call is visible
     as a null in the trace rather than a silent zero.
 
-    Known simplification: cache *writes* bill above the standard input rate
-    (~1.25x on Anthropic), but Usage folds them into input_tokens without a
-    separate count, so they are priced as ordinary input here. Under-reports on
-    the turn that populates a cache; correct on every turn that reads one.
+    Input bills in four classes, not one: fresh, read from cache, written to the
+    default-TTL cache, and written to a 1-hour cache. The two write classes cost
+    *more* than fresh input (1.25x and 2x on Anthropic, 1.25x on OpenAI), which
+    is why they are separated — folding them into plain input, as this used to,
+    under-reports exactly the calls that populate a cache. That is the first call
+    of every run.
+
+    A null premium falls back to the plain input rate, which is the truth for
+    Gemini (its implicit cache charges nothing extra to write) and the safest
+    guess anywhere else.
     """
     if not rates.priceable:
         return None
     assert rates.input is not None and rates.output is not None  # narrowed by priceable
 
-    cached = min(usage.cached_tokens, usage.input_tokens)
-    uncached = usage.input_tokens - cached
-    cached_rate = rates.cached_input if rates.cached_input is not None else rates.input
-
-    per_token = 1_000_000
+    buckets = usage.input_buckets
     total = (
-        uncached * rates.input + cached * cached_rate + usage.output_tokens * rates.output
-    ) / per_token
+        buckets.uncached * rates.input
+        + buckets.cached * (rates.cached_input if rates.cached_input is not None else rates.input)
+        + buckets.write * (rates.cache_write if rates.cache_write is not None else rates.input)
+        + buckets.write_1h
+        * (rates.cache_write_1h if rates.cache_write_1h is not None else rates.input)
+        + usage.output_tokens * rates.output
+    ) / PER_MTOK
     return round(total, 10)
+
+
+def cache_savings(usage: Usage, rates: Rates) -> float | None:
+    """What caching changed about this call's cost, in USD. None when unpriced.
+
+    Positive means the cache paid: reads at a tenth of the input rate saved more
+    than the writes cost. Negative means this call filled the cache and has yet
+    to be repaid — the honest reading of the first call of a run, and the reason
+    this is a signed number rather than a "saved" one.
+
+    Output is excluded from both sides: caching cannot touch it.
+    """
+    actual = cost_usd(usage, rates)
+    if actual is None:
+        return None
+    assert rates.input is not None  # narrowed by cost_usd returning a number
+    uncached_everything = usage.input_tokens * rates.input / PER_MTOK
+    input_actual = actual - (usage.output_tokens * (rates.output or 0.0)) / PER_MTOK
+    return round(uncached_everything - input_actual, 10)
 
 
 # ---------------------------------------------------------------- records
@@ -163,14 +196,22 @@ def call_record(response: ModelResponse) -> dict[str, Any]:
             # Zero across a whole run means the prompt prefix is moving. That is
             # invisible unless it is written down, so it is written down.
             "cached": usage.cached_tokens,
+            # Written this call, at a premium. A run whose writes never turn
+            # into reads paid 1.25x for nothing, which only these two rows
+            # together can show.
+            "cache_write": usage.cache_write_tokens,
+            "cache_write_1h": usage.cache_write_1h_tokens,
             "reasoning": usage.reasoning_tokens,
             "total": usage.total_tokens,
         },
         "cost_usd": cost_usd(usage, rates),
+        "cache_saved_usd": cache_savings(usage, rates),
         "rates_usd_per_mtok": {
             "input": rates.input,
             "output": rates.output,
             "cached_input": rates.cached_input,
+            "cache_write": rates.cache_write,
+            "cache_write_1h": rates.cache_write_1h,
         },
         "tool_calls": [c.name for c in response.tool_calls],
         "malformed_tool_calls": [c.name for c in response.tool_calls if c.args is None],

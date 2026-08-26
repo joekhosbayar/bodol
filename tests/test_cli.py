@@ -33,6 +33,8 @@ def _result(
     unpriced_calls: int = 0,
     error: str | None = None,
     messages: tuple[Message, ...] | None = None,
+    usage: Usage | None = None,
+    cache_saved_usd: float = 0.0,
 ) -> RunResult:
     if messages is None:
         messages = (Message(role="user", content=(TextBlock(text="task"),)),)
@@ -42,10 +44,11 @@ def _result(
         steps=steps,
         cost_usd=cost_usd,
         unpriced_calls=unpriced_calls,
-        usage=Usage(input_tokens=1000, output_tokens=234),
+        usage=usage if usage is not None else Usage(input_tokens=1000, output_tokens=234),
         trace_id="tr_abc123",
         messages=messages,
         error=error,
+        cache_saved_usd=cache_saved_usd,
     )
 
 
@@ -239,6 +242,64 @@ def test_min_recent_turns_overrides_the_derived_policy(agent) -> None:  # type: 
     assert isinstance(policy, ContextPolicy)
     assert policy.min_recent_turns == 3
     assert policy.max_input_tokens == int(1_048_576 * 0.6), "budget unchanged"
+
+
+# ---------------------------------------------------------------- caching
+
+
+def test_caching_is_on_unless_asked_otherwise(agent) -> None:  # type: ignore[no-untyped-def]
+    runner.invoke(cli.app, ["run", "hello"])
+    assert agent.created[0].kwargs["cache"] is True
+
+
+def test_no_cache_reaches_the_agent(agent) -> None:  # type: ignore[no-untyped-def]
+    runner.invoke(cli.app, ["run", "hello", "--no-cache"])
+    assert agent.created[0].kwargs["cache"] is False
+
+
+def test_no_cache_on_gemini_says_it_cannot_be_honoured(agent) -> None:  # type: ignore[no-untyped-def]
+    """Gemini's cache is implicit with no opt-out, so the flag would silently do
+    nothing and an A/B comparison would show no difference for the wrong reason."""
+    result = runner.invoke(
+        cli.app, ["run", "hello", "--provider", "gemini:gemini-3.7-flash", "--no-cache"]
+    )
+
+    assert "no opt-out" in result.stderr
+    assert agent.created[0].kwargs["cache"] is False, "still passed; the adapter ignores it"
+
+
+def test_a_cache_hit_is_summarized_with_what_it_saved(agent) -> None:  # type: ignore[no-untyped-def]
+    agent.shape["result"] = _result(
+        usage=Usage(input_tokens=10_000, output_tokens=234, cached_tokens=6_000),
+        cache_saved_usd=0.0021,
+    )
+
+    result = runner.invoke(cli.app, ["run", "hello"])
+
+    assert "cache 60% hit" in result.stderr
+    assert "saved $0.0021" in result.stderr
+
+
+def test_a_run_that_only_filled_the_cache_is_not_called_a_saving(agent) -> None:  # type: ignore[no-untyped-def]
+    agent.shape["result"] = _result(
+        usage=Usage(input_tokens=4_096, output_tokens=100, cache_write_tokens=4_096),
+        cache_saved_usd=-0.0003,
+    )
+
+    result = runner.invoke(cli.app, ["run", "hello"])
+
+    assert "4,096 written" in result.stderr
+    assert "cost $0.0003 to fill" in result.stderr
+    assert "saved" not in result.stderr
+
+
+def test_no_cache_activity_adds_nothing_to_the_summary(agent) -> None:  # type: ignore[no-untyped-def]
+    """Below the vendor's minimum prefix there is nothing to report, and a run
+    summary is not the place to explain a zero."""
+    result = runner.invoke(cli.app, ["run", "hello"])
+
+    assert "cache" not in result.stderr
+    assert "done" in result.stderr
 
 
 # ---------------------------------------------------------------- output
