@@ -161,7 +161,12 @@ def test_run_loads_the_prompt_and_registers_the_builtins(agent) -> None:  # type
 
     (stub,) = agent.created
     assert "bodol" in stub.kwargs["system"], "the v1 prompt text is passed, not the version"
-    assert [s.name for s in stub.kwargs["tools"].specs] == ["calculator", "file_read", "grep"]
+    assert [s.name for s in stub.kwargs["tools"].specs] == [
+        "calculator",
+        "file_read",
+        "grep",
+        "list_files",
+    ]
 
 
 def test_run_derives_the_context_budget_from_the_model(agent) -> None:  # type: ignore[no-untyped-def]
