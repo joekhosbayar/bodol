@@ -361,12 +361,23 @@ class Agent:
                         # Summarization goes through the same traced provider,
                         # so it lands in the trace under the step that caused
                         # it, and is not counted against max_steps.
+                        input_tokens = manager.last_input_tokens or 0
+                        before = len(messages)
                         try:
                             messages = await manager.compact(
                                 messages, provider=provider, system=self.system
                             )
                         except CompactionError as exc:
                             return result(StopReason.COMPACTION_FAILED, error=str(exc))
+                        logger.info(
+                            progress.compact_line(
+                                steps,
+                                input_tokens=input_tokens,
+                                budget=manager.policy.max_input_tokens,
+                                before=before,
+                                after=len(messages),
+                            )
+                        )
             finally:
                 # Closes the JSONL sink too, so the trace file is complete even
                 # when the run ended on an exception.

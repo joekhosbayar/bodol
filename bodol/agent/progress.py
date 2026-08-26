@@ -111,6 +111,28 @@ def retry_line(
     )
 
 
+def compact_line(
+    step: int,
+    *,
+    input_tokens: int,
+    budget: int,
+    before: int,
+    after: int,
+) -> str:
+    """The context manager summarized the transcript to fit the budget.
+
+    Announced because it is silent otherwise: the summarization call goes
+    through the traced provider and lands in the JSONL, but a user watching
+    the terminal has no way to know the transcript was rewritten under them.
+    """
+    evicted = before - after + 1  # the summary replaces the evicted middle
+    return (
+        f"compact step {step}"
+        f" · {input_tokens:,} in over {budget:,} budget"
+        f" · {evicted} messages summarized"
+    )
+
+
 def text_line(response: ModelResponse) -> str | None:
     """The model's prose, clipped to one line. None when it wrote none.
 

@@ -100,6 +100,11 @@ class ContextManager:
         self.policy = policy
         self._last_input_tokens: int | None = None
 
+    @property
+    def last_input_tokens(self) -> int | None:
+        """Input size of the most recent model call, or None before the first."""
+        return self._last_input_tokens
+
     def observe(self, response: ModelResponse) -> None:
         """Record the input size of the call that produced `response`."""
         self._last_input_tokens = response.usage.input_tokens
