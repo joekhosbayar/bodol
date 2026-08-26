@@ -86,6 +86,31 @@ def step_line(
     )
 
 
+def retry_line(
+    step: int,
+    error: str,
+    retries_left: int,
+    retries_allowed: int,
+    elapsed: float,
+    budget: float,
+) -> str:
+    """A turn about to be attempted again after the provider failed transiently.
+
+    Carries the step number rather than an attempt number so it lines up with the
+    `step N` header that eventually follows — the whole point of not advancing the
+    step on a retry is that this reads as "step 3, again", not as a new step.
+
+    The elapsed/budget pair is here for the same reason it is on `step_line`, and
+    matters more: retries are the mechanism by which a run's remaining time
+    disappears without anything visibly happening.
+    """
+    return (
+        f"retry step {step} · {error}"
+        f" · {retries_left} of {retries_allowed} left"
+        f" · {elapsed:.0f}s/{budget:g}s"
+    )
+
+
 def text_line(response: ModelResponse) -> str | None:
     """The model's prose, clipped to one line. None when it wrote none.
 

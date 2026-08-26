@@ -10,6 +10,7 @@ from bodol.agent import Agent, Limits, RunResult, StopReason
 from bodol.agent import loop as loop_module
 from bodol.context import ContextPolicy
 from bodol.providers import UnsupportedProviderError
+from bodol.providers import http as http_module
 from bodol.providers.base import (
     FinishReason,
     Message,
@@ -22,6 +23,7 @@ from bodol.providers.base import (
     ToolUseBlock,
     Usage,
 )
+from bodol.providers.http import PermanentError, QuotaError, TransientError
 from bodol.telemetry import events
 from bodol.tools import ToolRegistry
 
@@ -630,3 +632,173 @@ async def test_trace_is_scoped_to_the_run(install: InstallProvider) -> None:
     assert events.current_step() == 0, "the step counter is restored"
     assert provider.steps == [1, 2]
     assert provider.closed == 1
+
+
+# ------------------------------------------------------------- step retries
+
+
+class FlakyProvider(FakeProvider):
+    """Fails a set number of times before replaying its script."""
+
+    def __init__(self, failures: int, exc: Exception, *, script: Sequence[ModelResponse]) -> None:
+        super().__init__(script)
+        self._failures = failures
+        self._exc = exc
+
+    async def generate(self, *args: object, **kwargs: object) -> ModelResponse:
+        if self._failures > 0:
+            self._failures -= 1
+            self.calls.append(([], None, (), 0))
+            self.steps.append(events.current_step())
+            raise self._exc
+        return await super().generate(*args, **kwargs)  # type: ignore[arg-type]
+
+
+async def test_a_transient_failure_is_retried_instead_of_ending_the_run(
+    install: InstallProvider,
+) -> None:
+    """A run given 300s died after 137 of them, with 160 seconds it never spent.
+
+    One 500 from the provider ended the whole run. It is busy, not broken.
+    """
+    provider = install(
+        FlakyProvider(
+            2,
+            TransientError("HTTP 500", status=500, body=None, url="u"),
+            script=[_response(text="done")],
+        )
+    )
+
+    result = await Agent("fake").run("go")
+
+    assert result.stop_reason is StopReason.DONE
+    assert result.text == "done"
+    assert len(provider.calls) == 3, "two failures and the success"
+    assert result.steps == 1, "one turn, however many attempts it took"
+
+
+async def test_the_step_number_holds_across_retries(install: InstallProvider) -> None:
+    """"Step 3 failed twice then succeeded" is readable; three unrelated
+    numbers for the same turn is not."""
+    provider = install(
+        FlakyProvider(
+            2,
+            TransientError("HTTP 503", status=503, body=None, url="u"),
+            script=[_response(text="done")],
+        )
+    )
+
+    await Agent("fake").run("go")
+
+    assert provider.steps == [1, 1, 1]
+
+
+async def test_step_retries_are_bounded(install: InstallProvider) -> None:
+    provider = install(
+        FlakyProvider(
+            5,
+            TransientError("HTTP 500", status=500, body=None, url="u"),
+            script=[_response(text="never reached")],
+        )
+    )
+
+    result = await Agent("fake", limits=Limits(max_step_retries=1)).run("go")
+
+    assert result.stop_reason is StopReason.ERROR
+    assert result.error is not None and "TransientError" in result.error
+    assert len(provider.calls) == 2, "the attempt and its one retry"
+    assert result.steps == 0, "no turn ever completed"
+
+
+async def test_no_retry_once_the_run_is_out_of_time(
+    install: InstallProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retrying is only worth it while there is budget left to retry into."""
+    ticks = iter([0.0, 0.0])
+
+    def clock() -> float:
+        return next(ticks, 1000.0)
+
+    monkeypatch.setattr(loop_module, "_monotonic", clock)
+    provider = install(
+        FlakyProvider(
+            5,
+            TransientError("HTTP 500", status=500, body=None, url="u"),
+            script=[_response(text="never reached")],
+        )
+    )
+
+    result = await Agent("fake").run("go")
+
+    assert result.stop_reason is StopReason.ERROR
+    assert len(provider.calls) == 1, "no retry into a budget that is already gone"
+
+
+async def test_a_quota_error_ends_the_run_at_once(install: InstallProvider) -> None:
+    """The allowance is spent, and every further attempt spends more of it."""
+    provider = install(
+        FlakyProvider(
+            5,
+            QuotaError("out of allowance", status=429, body=None, url="u"),
+            script=[_response(text="never reached")],
+        )
+    )
+
+    result = await Agent("fake").run("go")
+
+    assert result.stop_reason is StopReason.ERROR
+    assert result.error is not None and "QuotaError" in result.error
+    assert len(provider.calls) == 1
+
+
+async def test_a_permanent_error_ends_the_run_at_once(install: InstallProvider) -> None:
+    provider = install(
+        FlakyProvider(
+            5,
+            PermanentError("HTTP 400", status=400, body=None, url="u"),
+            script=[_response(text="never reached")],
+        )
+    )
+
+    result = await Agent("fake").run("go")
+
+    assert result.stop_reason is StopReason.ERROR
+    assert len(provider.calls) == 1
+
+
+async def test_a_retry_is_announced_while_it_happens(
+    install: InstallProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Silence during a retry is indistinguishable from a hung process."""
+    install(
+        FlakyProvider(
+            1,
+            TransientError("HTTP 500", status=500, body=None, url="u"),
+            script=[_response(text="done")],
+        )
+    )
+
+    with caplog.at_level("INFO", logger="bodol.agent.loop"):
+        await Agent("fake").run("go")
+
+    notices = [r.getMessage() for r in caplog.records if "retry step" in r.getMessage()]
+    assert notices == ["retry step 1 · TransientError · 1 of 2 left · 0s/120s"]
+
+
+async def test_the_run_budget_is_published_for_the_retry_layer(
+    install: InstallProvider,
+) -> None:
+    """`--max-seconds 300` reached nothing: the HTTP layer only ever knew its
+    own 90s ceiling, so the flag bought no extra time at all."""
+    seen: list[float | None] = []
+
+    class Watcher(FakeProvider):
+        async def generate(self, *args: object, **kwargs: object) -> ModelResponse:
+            seen.append(http_module._run_deadline.get())
+            return await super().generate(*args, **kwargs)  # type: ignore[arg-type]
+
+    install(Watcher([_response(text="done")]))
+
+    await Agent("fake", limits=Limits(max_seconds=300.0)).run("go")
+
+    assert seen and seen[0] is not None, "the run's deadline was visible inside the call"
