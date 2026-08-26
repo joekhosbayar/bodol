@@ -29,7 +29,7 @@ import typer
 
 from bodol import __version__, config
 from bodol.agent import Agent, Limits, RunResult, StopReason, progress, prompts
-from bodol.context import policy_for
+from bodol.context import ContextPolicy, policy_for
 from bodol.providers import ProviderRegistryError
 from bodol.tools.builtins import register_builtins
 
@@ -169,6 +169,25 @@ def run(
     max_steps: Annotated[int, typer.Option(help="Stop after N steps.")] = 12,
     max_cost: Annotated[float, typer.Option(help="Stop after $N.")] = 0.25,
     max_seconds: Annotated[int, typer.Option(help="Stop after N seconds.")] = 120,
+    max_input_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-input-tokens",
+            help=(
+                "Override the context budget. Compaction fires when the last"
+                " call's input tokens exceed this. Works on any provider, even"
+                " one with no known window. Set small (e.g. 2000) to test"
+                " compaction on a short run."
+            ),
+        ),
+    ] = None,
+    min_recent_turns: Annotated[
+        int,
+        typer.Option(
+            "--min-recent-turns",
+            help="Turns kept verbatim at the tail when compaction fires.",
+        ),
+    ] = 2,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the whole RunResult as JSON.")
     ] = False,
@@ -180,19 +199,31 @@ def run(
         known = ", ".join(prompts.available()) or "none found"
         _die(f"{exc}\n  available prompt versions: {known}")
 
-    # No known window means no verified budget, so compaction stays off rather
-    # than being sized from a guess. This is also where a malformed spec first
-    # surfaces, before anything has been constructed.
-    try:
-        policy = policy_for(provider)
-    except ProviderRegistryError as exc:
-        _die(str(exc))
-    if policy is None and not json_output:
-        typer.secho(
-            f"  no context window on record for {provider}; compaction disabled",
-            fg=typer.colors.BRIGHT_BLACK,
-            err=True,
+    # A manual budget overrides the derived one, and works even when the
+    # model's window is unknown — which is the point: it makes compaction
+    # testable on any provider without editing the context-window table.
+    if max_input_tokens is not None:
+        policy: ContextPolicy | None = ContextPolicy(
+            max_input_tokens=max_input_tokens,
+            min_recent_turns=min_recent_turns,
         )
+    else:
+        try:
+            policy = policy_for(provider)
+        except ProviderRegistryError as exc:
+            _die(str(exc))
+        if policy is not None and min_recent_turns != 2:
+            policy = ContextPolicy(
+                max_input_tokens=policy.max_input_tokens,
+                summary_max_tokens=policy.summary_max_tokens,
+                min_recent_turns=min_recent_turns,
+            )
+        if policy is None and not json_output:
+            typer.secho(
+                f"  no context window on record for {provider}; compaction disabled",
+                fg=typer.colors.BRIGHT_BLACK,
+                err=True,
+            )
 
     agent = Agent(
         provider,

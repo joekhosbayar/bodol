@@ -785,6 +785,33 @@ async def test_a_retry_is_announced_while_it_happens(
     assert notices == ["retry step 1 · TransientError · 1 of 2 left · 0s/120s"]
 
 
+async def test_compaction_is_announced_while_it_happens(
+    install: InstallProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A silent compaction is indistinguishable from the model pausing."""
+    install(
+        FakeProvider(
+            [
+                _response(tool_calls=(_tool_call(call_id="a"),), input_tokens=10),
+                # Over the 50-token budget, so this round triggers compaction.
+                _response(tool_calls=(_tool_call(call_id="b"),), input_tokens=900),
+                _response(text="a summary of what came before", input_tokens=20),
+                _response(text="all done", input_tokens=20),
+            ]
+        )
+    )
+
+    with caplog.at_level("INFO", logger="bodol.agent.loop"):
+        await Agent(
+            "fake:fake-model",
+            tools=_weather_registry(),
+            context=ContextPolicy(max_input_tokens=50, min_recent_turns=1),
+        ).run("weather?")
+
+    notices = [r.getMessage() for r in caplog.records if "compact step" in r.getMessage()]
+    assert notices == ["compact step 2 · 900 in over 50 budget · 2 messages summarized"]
+
+
 async def test_the_run_budget_is_published_for_the_retry_layer(
     install: InstallProvider,
 ) -> None:

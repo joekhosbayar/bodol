@@ -186,6 +186,61 @@ def test_unknown_window_disables_compaction_and_says_so(agent) -> None:  # type:
     assert "compaction disabled" in result.stderr
 
 
+def test_max_input_tokens_overrides_the_derived_budget(agent) -> None:  # type: ignore[no-untyped-def]
+    """A manual budget replaces the window-derived one, however large the window."""
+    runner.invoke(
+        cli.app,
+        ["run", "hello", "--provider", "gemini:gemini-3.7-flash", "--max-input-tokens", "2000"],
+    )
+
+    (stub,) = agent.created
+    policy = stub.kwargs["context"]
+    assert isinstance(policy, ContextPolicy)
+    assert policy.max_input_tokens == 2000
+    assert policy.min_recent_turns == 2
+
+
+def test_max_input_tokens_enables_compaction_on_an_unknown_window(agent) -> None:  # type: ignore[no-untyped-def]
+    """The whole point: compaction is testable on any provider, not just ones
+    with a verified context window."""
+    result = runner.invoke(
+        cli.app,
+        ["run", "hello", "--provider", "openai:gpt-5.6-luna", "--max-input-tokens", "2000"],
+    )
+
+    (stub,) = agent.created
+    policy = stub.kwargs["context"]
+    assert isinstance(policy, ContextPolicy)
+    assert policy.max_input_tokens == 2000
+    assert "compaction disabled" not in result.stderr
+
+
+def test_min_recent_turns_is_passed_through(agent) -> None:  # type: ignore[no-untyped-def]
+    runner.invoke(
+        cli.app,
+        ["run", "hello", "--max-input-tokens", "2000", "--min-recent-turns", "4"],
+    )
+
+    (stub,) = agent.created
+    policy = stub.kwargs["context"]
+    assert isinstance(policy, ContextPolicy)
+    assert policy.min_recent_turns == 4
+
+
+def test_min_recent_turns_overrides_the_derived_policy(agent) -> None:  # type: ignore[no-untyped-def]
+    """The flag also adjusts a window-derived policy, not just a manual one."""
+    runner.invoke(
+        cli.app,
+        ["run", "hello", "--provider", "gemini:gemini-3.7-flash", "--min-recent-turns", "3"],
+    )
+
+    (stub,) = agent.created
+    policy = stub.kwargs["context"]
+    assert isinstance(policy, ContextPolicy)
+    assert policy.min_recent_turns == 3
+    assert policy.max_input_tokens == int(1_048_576 * 0.6), "budget unchanged"
+
+
 # ---------------------------------------------------------------- output
 
 

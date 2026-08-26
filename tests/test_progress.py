@@ -64,6 +64,33 @@ def test_the_budget_is_shown_without_a_pointless_decimal() -> None:
     assert "0s/0.5s" in fractional, "a real fraction still survives"
 
 
+# ------------------------------------------------------------- compaction
+
+
+def test_the_compact_line_says_what_triggered_it_and_what_it_did() -> None:
+    line = progress.compact_line(
+        2,
+        input_tokens=983,
+        budget=800,
+        before=7,
+        after=3,
+    )
+
+    assert line == "compact step 2 · 983 in over 800 budget · 5 messages summarized"
+
+
+def test_the_compact_line_formats_large_numbers_with_commas() -> None:
+    line = progress.compact_line(
+        14,
+        input_tokens=128_400,
+        budget=120_000,
+        before=22,
+        after=8,
+    )
+
+    assert "128,400 in over 120,000 budget" in line
+
+
 # ---------------------------------------------------------------- model prose
 
 
