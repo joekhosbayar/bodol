@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from bodol.tools.builtins import MAX_READ_BYTES, calculate, register_builtins
+from bodol.tools.builtins import MAX_LIST_RESULTS, MAX_READ_BYTES, calculate, register_builtins
 from bodol.tools.registry import ToolRegistry
 
 
@@ -216,13 +218,121 @@ def test_grep_refuses_paths_outside_the_root(tree: Path) -> None:
         grep(pattern="x", path="..")
 
 
+# ---------------------------------------------------------------- list_files
+
+
+def _listed(tree: Path, **kwargs: Any) -> Any:
+    list_files = _handler(register_builtins(root=tree), "list_files")
+    return json.loads(list_files(**kwargs))
+
+
+def test_list_files_matches_a_pattern_at_any_depth(tree: Path) -> None:
+    """The canonical question: how many Python files, without guessing a layout."""
+    (tree / "app" / "util.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+
+    out = _listed(tree, pattern="*.py")
+
+    assert out["count"] == 2
+    assert out["truncated"] is False
+    by_path = {f["path"]: f["bytes"] for f in out["files"]}
+    assert set(by_path) == {"app/main.py", "app/util.py"}
+    assert by_path["app/main.py"] == len("import os\n\n\ndef start():\n    return os.getcwd()\n")
+
+
+def test_list_files_skips_generated_directories(tree: Path) -> None:
+    out = _listed(tree, pattern="*")
+
+    paths = [f["path"] for f in out["files"]]
+    assert ".git/COMMIT_EDITMSG" not in paths
+    assert out["count"] == len(paths), "the count never covers what the walker skipped"
+
+
+def test_list_files_scopes_to_a_subtree(tree: Path) -> None:
+    out = _listed(tree, pattern="*.py", path="app")
+
+    assert out["count"] == 1
+    assert out["files"][0]["path"] == "app/main.py", "paths stay relative to the root"
+
+
+def test_list_files_matches_a_prefixed_pattern(tree: Path) -> None:
+    out = _listed(tree, pattern="app/*.py")
+
+    assert out["count"] == 1
+
+
+def test_list_files_reports_zero_matches_as_data_not_an_error(tree: Path) -> None:
+    out = _listed(tree, pattern="*.rs")
+
+    assert out["count"] == 0
+    assert out["files"] == []
+
+
+def test_list_files_count_stays_exact_when_the_list_is_truncated(tree: Path) -> None:
+    """A monorepo must not flood the next call, but the answer must stay true."""
+    for i in range(5):
+        (tree / "app" / f"mod_{i}.py").write_text(f"# {i}\n", encoding="utf-8")
+
+    out = _listed(tree, pattern="*.py", max_results=2)
+
+    assert out["count"] == 6
+    assert out["returned"] == 2
+    assert out["truncated"] is True
+
+
+def test_list_files_caps_max_results(tree: Path) -> None:
+    out = _listed(tree, pattern="*", max_results=10_000_000)
+
+    assert out["count"] <= MAX_LIST_RESULTS or out["returned"] <= MAX_LIST_RESULTS
+
+
+def test_list_files_includes_oversized_files_in_the_count(tree: Path) -> None:
+    """A file too large to grep line by line still counts as a file."""
+    big = tree / "app" / "generated.py"
+    big.write_text("x" * 3_000_000, encoding="utf-8")
+
+    out = _listed(tree, pattern="*.py")
+
+    assert out["count"] == 2
+    assert next(f for f in out["files"] if f["path"] == "app/generated.py")["bytes"] == 3_000_000
+
+
+def test_list_files_refuses_paths_outside_the_root(tree: Path) -> None:
+    list_files = _handler(register_builtins(root=tree), "list_files")
+
+    with pytest.raises(ValueError, match="outside the allowed root"):
+        list_files(pattern="*", path="..")
+
+
+def test_list_files_refuses_a_symlinked_start_pointing_out(tree: Path) -> None:
+    (tree.parent / "outside").mkdir(exist_ok=True)
+    (tree / "escape").symlink_to(tree.parent / "outside", target_is_directory=True)
+    list_files = _handler(register_builtins(root=tree), "list_files")
+
+    with pytest.raises(ValueError, match="outside the allowed root"):
+        list_files(pattern="*", path="escape")
+
+
+def test_list_files_reports_missing_paths_and_empty_patterns(tree: Path) -> None:
+    list_files = _handler(register_builtins(root=tree), "list_files")
+
+    with pytest.raises(ValueError, match="no such path"):
+        list_files(pattern="*", path="nope")
+    with pytest.raises(ValueError, match="cannot be empty"):
+        list_files(pattern="  ")
+
+
 # ---------------------------------------------------------------- registration
 
 
-def test_register_builtins_declares_three_usable_tools(tree: Path) -> None:
+def test_register_builtins_declares_four_usable_tools(tree: Path) -> None:
     registry = register_builtins(root=tree)
 
-    assert [spec.name for spec in registry.specs] == ["calculator", "file_read", "grep"]
+    assert [spec.name for spec in registry.specs] == [
+        "calculator",
+        "file_read",
+        "grep",
+        "list_files",
+    ]
     for spec in registry.specs:
         assert spec.description.strip()
         assert spec.parameters["type"] == "object"

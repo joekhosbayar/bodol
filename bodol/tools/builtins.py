@@ -1,6 +1,6 @@
-"""Built-in tools: calculator, file read, grep.
+"""Built-in tools: calculator, file read, grep, file listing.
 
-All three are read-only and confined to one root directory, `Path.cwd()` by
+All four are read-only and confined to one root directory, `Path.cwd()` by
 default. Every path a model supplies is resolved and checked against that root,
 which rejects `../` traversal and symlinks pointing outward in the same test.
 
@@ -20,6 +20,8 @@ handler exception into an `is_error` result the model sees and can correct from.
 from __future__ import annotations
 
 import ast
+import fnmatch
+import json
 import operator
 import re
 from collections.abc import Callable, Iterator
@@ -38,6 +40,10 @@ MAX_GREP_MATCHES = 100
 # Files above this are almost certainly data or binaries; scanning them line by
 # line burns the step budget for nothing.
 MAX_GREP_FILE_BYTES = 2_000_000
+# The listing is bounded so a monorepo cannot flood the next model call, but
+# the count in the response is always exact — a truncated list with a true
+# count still answers "how many".
+MAX_LIST_RESULTS = 200
 
 # ---------------------------------------------------------------- calculator
 
@@ -138,8 +144,12 @@ def _read_file(root: Path, path: str, max_bytes: int = MAX_READ_BYTES) -> str:
     return text
 
 
-def _walk_files(start: Path) -> Iterator[Path]:
-    """Yield files under `start`, skipping generated and oversized ones."""
+def _walk_files(start: Path, max_bytes: int | None = MAX_GREP_FILE_BYTES) -> Iterator[Path]:
+    """Yield files under `start`, skipping generated and oversized ones.
+
+    `max_bytes=None` lists everything: a file too large to *grep* line by line
+    still counts when the question is how many files there are.
+    """
     if start.is_file():
         yield start
         return
@@ -148,10 +158,57 @@ def _walk_files(start: Path) -> Iterator[Path]:
         for name in sorted(filenames):
             candidate = parent / name
             try:
-                if candidate.is_file() and candidate.stat().st_size <= MAX_GREP_FILE_BYTES:
+                if candidate.is_file() and (
+                    max_bytes is None or candidate.stat().st_size <= max_bytes
+                ):
                     yield candidate
             except OSError:
                 continue
+
+
+def _list_files(
+    root: Path,
+    pattern: str,
+    path: str = ".",
+    max_results: int = MAX_LIST_RESULTS,
+) -> str:
+    """List files matching a glob, with an exact count and byte sizes.
+
+    Returns JSON so `count` stays a number the model can trust instead of a
+    sentence it has to parse. The list itself may be truncated; the count never
+    is.
+    """
+    if not pattern.strip():
+        raise ValueError("pattern cannot be empty")
+    start = _resolved(root, path)
+    if not start.exists():
+        raise ValueError(f"no such path: {path!r}")
+
+    limit = max(1, min(int(max_results), MAX_LIST_RESULTS))
+    matched: list[tuple[str, int]] = []
+    for file in _walk_files(start, max_bytes=None):
+        rel = file.relative_to(root).as_posix() if root in file.parents else file.name
+        # Matched against the full relative path and the bare name, so `*.py`
+        # finds files at any depth and `bodol/*.py` still scopes. fnmatchcase,
+        # because fnmatch lowercases on macOS and "*.PY" should not match.
+        if fnmatch.fnmatchcase(rel, pattern) or fnmatch.fnmatchcase(file.name, pattern):
+            try:
+                matched.append((rel, file.stat().st_size))
+            except OSError:
+                continue
+    matched.sort()
+
+    listed = matched[:limit]
+    return json.dumps(
+        {
+            "pattern": pattern,
+            "path": path,
+            "count": len(matched),
+            "returned": len(listed),
+            "truncated": len(matched) > len(listed),
+            "files": [{"path": rel, "bytes": size} for rel, size in listed],
+        }
+    )
 
 
 def _grep(
@@ -231,6 +288,32 @@ _GREP_SCHEMA: dict[str, Any] = {
     "required": ["pattern"],
 }
 
+_LIST_FILES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "pattern": {
+            "type": "string",
+            "description": (
+                "Filename glob, matched at any depth, e.g. '*.py' or 'test_*.py'. "
+                "Use '*' to list every file."
+            ),
+        },
+        "path": {
+            "type": "string",
+            "description": "Directory to list, relative to the working directory. "
+            "Defaults to the whole tree.",
+        },
+        "max_results": {
+            "type": "integer",
+            "description": (
+                f"Return at most this many files. Max {MAX_LIST_RESULTS}. "
+                "The count in the response is exact even when the list is truncated."
+            ),
+        },
+    },
+    "required": ["pattern"],
+}
+
 
 def register_builtins(
     registry: ToolRegistry | None = None, *, root: Path | None = None
@@ -270,7 +353,25 @@ def register_builtins(
             base, pattern, path, max_matches
         ),
     )
+    registry.register(
+        name="list_files",
+        description=(
+            "List files by name pattern, with byte sizes and an exact count. "
+            "Use this to see what exists before guessing a path, and to answer "
+            "questions about how many files there are or which is largest."
+        ),
+        parameters=_LIST_FILES_SCHEMA,
+        handler=lambda pattern, path=".", max_results=MAX_LIST_RESULTS: _list_files(
+            base, pattern, path, max_results
+        ),
+    )
     return registry
 
 
-__all__ = ["MAX_GREP_MATCHES", "MAX_READ_BYTES", "calculate", "register_builtins"]
+__all__ = [
+    "MAX_GREP_MATCHES",
+    "MAX_LIST_RESULTS",
+    "MAX_READ_BYTES",
+    "calculate",
+    "register_builtins",
+]
